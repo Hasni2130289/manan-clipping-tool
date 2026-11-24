@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Manan Clipping Tool</title>
+  <meta name="description" content="Paste a YouTube or Facebook video link, get short vertical clips.">
+  <link rel="icon" href="assets/logo.jpg" type="image/jpeg">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="container">
+
+    <!-- Server waking-up notice: shown by app.js when an API request takes
+         longer than 5 seconds (Render's free tier sleeps after inactivity).
+         It sits outside both views so it is visible on the login view too. -->
+    <p id="server-status" class="server-status hidden" role="status" aria-live="polite">Server is waking up &mdash; Render&rsquo;s free tier sleeps after inactivity, please wait&hellip;</p>
+
+    <!-- Login view: shown when there is no token in localStorage. The main
+         app (header, main, footer) lives in #app-view and stays hidden
+         until login succeeds. -->
+    <section id="login-view" class="login-view hidden" aria-labelledby="login-heading">
+      <div class="login-card">
+        <img class="login-logo" src="assets/logo.jpg" alt="Manan Clipping Tool logo" width="96" height="96">
+        <h1 id="login-heading">Manan Clipping Tool</h1>
+        <p class="subtitle">Enter your password to continue.</p>
+        <form id="login-form" novalidate>
+          <label for="login-password">Password</label>
+          <input type="password" id="login-password" name="password" autocomplete="current-password" required>
+          <label class="show-row"><input type="checkbox" id="show-login-password"> Show password</label>
+          <button type="submit" class="btn" id="login-btn">Log in</button>
+        </form>
+        <p id="login-error" class="error" role="alert" aria-live="polite"></p>
+      </div>
+    </section>
+
+    <!-- Main app (hidden until login) -->
+    <div id="app-view">
+
+    <!-- 1. Header -->
+    <header class="site-header">
+      <div class="brand">
+        <img class="brand-logo" src="assets/logo.jpg" alt="Manan Clipping Tool logo" width="52" height="52">
+        <h1>Manan Clipping Tool</h1>
+        <button type="button" class="btn btn-secondary btn-small logout-btn hidden" id="logout-btn">Log out</button>
+      </div>
+      <p class="subtitle">Make short vertical clips from a video link &mdash; or download the video itself (TikTok, Facebook, YouTube).</p>
+    </header>
+
+    <main>
+      <!-- Tool tabs: Clipping tool / Video Downloader -->
+      <nav class="tabs" aria-label="Tool sections">
+        <button type="button" class="tab-btn active" id="tab-clipper" aria-selected="true" aria-controls="clipper-view">Clipping tool</button>
+        <button type="button" class="tab-btn" id="tab-downloader" aria-selected="false" aria-controls="downloader-view">Video downloader</button>
+      </nav>
+
+      <!-- Clipping tool view -->
+      <div id="clipper-view">
+      <!-- 2. What to know -->
+      <section class="info-box" aria-labelledby="what-to-know-heading">
+        <h2 id="what-to-know-heading">What to know</h2>
+        <ul>
+          <li>YouTube usually works for public videos, but age-restricted, login-required or bot-blocked videos can fail.</li>
+          <li>Facebook only sometimes works for public videos and breaks often.</li>
+          <li>For livestreams, paste the VOD link after the stream ends. Live capture is not supported in this version.</li>
+        </ul>
+        <p><strong>Copyright:</strong> clipping other creators&rsquo; content can draw Content ID claims or strikes &mdash; only clip content you own or have permission to use.</p>
+      </section>
+
+      <!-- 3. Paste-link form -->
+      <section class="card" aria-labelledby="fetch-heading">
+        <h2 id="fetch-heading">Fetch a video</h2>
+        <form id="fetch-form" class="url-form" novalidate>
+          <label class="hidden" for="video-url">Video link</label>
+          <input type="url" id="video-url" name="url" placeholder="https://www.youtube.com/watch?v=... or https://www.facebook.com/..." autocomplete="off" spellcheck="false" enterkeyhint="go" required>
+          <button type="submit" class="btn" id="fetch-btn">Fetch video</button>
+        </form>
+        <p id="fetch-error" class="error" role="alert" aria-live="polite"></p>
+        <p class="hint">Supported sites: youtube.com, youtu.be, facebook.com, fb.watch</p>
+      </section>
+
+      <!-- Previous jobs -->
+      <section class="card" id="previous-jobs-section" aria-labelledby="previous-jobs-heading">
+        <h2 id="previous-jobs-heading">Previous videos</h2>
+        <p id="previous-jobs-empty" class="empty-state">No videos yet. Fetch a video above to get started.</p>
+        <ul id="previous-jobs" class="job-list"></ul>
+      </section>
+
+      <!-- 4. Job panel -->
+      <section class="card hidden" id="job-panel" aria-labelledby="job-title" aria-live="polite">
+        <div class="job-head">
+          <img id="job-thumbnail" class="job-thumb hidden" src="" alt="">
+          <div class="job-meta">
+            <h2 id="job-title" class="job-title">Untitled video</h2>
+            <p id="job-url" class="job-url"></p>
+            <div class="job-row">
+              <span id="job-status" class="badge badge-queued">Queued</span>
+              <span id="job-duration" class="job-duration"></span>
+            </div>
+            <div class="progress-wrap">
+              <div class="progress-bar" role="progressbar" aria-label="Job progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progress-bar">
+                <div class="progress-fill" id="progress-fill"></div>
+              </div>
+              <div class="progress-label">
+                <span id="progress-message" class="progress-message"></span>
+                <span id="progress-percent">0%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 5. Transcript panel -->
+      <section class="card hidden" id="transcript-panel" aria-labelledby="transcript-heading">
+        <h2 id="transcript-heading">Transcript</h2>
+        <p class="hint">Click a segment to set the clip editor to that moment (up to 45 seconds, or to the end of the segment).</p>
+        <div id="transcript-list" class="transcript-list"></div>
+        <p id="transcript-empty" class="empty-state hidden">No transcript available &mdash; you can still render a clip with manual hook text and no captions.</p>
+      </section>
+
+      <!-- 6. Highlights panel -->
+      <section class="card hidden" id="highlights-panel" aria-labelledby="highlights-heading">
+        <h2 id="highlights-heading">Suggested clips</h2>
+        <div id="highlights-grid" class="highlights-grid"></div>
+        <p id="highlights-empty" class="empty-state hidden">No suggested clips for this video yet.</p>
+      </section>
+
+      <!-- 7. Clip editor -->
+      <section class="card hidden" id="editor-panel" aria-labelledby="editor-heading">
+        <h2 id="editor-heading">Clip editor</h2>
+
+        <div class="editor-grid">
+          <div class="field">
+            <label for="start-number">Start (seconds)</label>
+            <div class="range-row">
+              <input type="range" id="start-range" min="0" max="0" step="0.1" value="0" aria-label="Start time slider">
+              <input type="number" id="start-number" min="0" max="0" step="0.1" value="0">
+            </div>
+          </div>
+          <div class="field">
+            <label for="end-number">End (seconds)</label>
+            <div class="range-row">
+              <input type="range" id="end-range" min="0" max="0" step="0.1" value="0" aria-label="End time slider">
+              <input type="number" id="end-number" min="0" max="0" step="0.1" value="0">
+            </div>
+          </div>
+        </div>
+
+        <p id="clip-length" class="clip-length">Clip length: 0:00</p>
+
+        <div class="field">
+          <label for="hook-text">Hook text (top of video, optional)</label>
+          <input type="text" id="hook-text" placeholder="e.g. Wait for the twist" maxlength="120" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="cta-text">CTA text (bottom of video, optional)</label>
+          <input type="text" id="cta-text" value="Follow for more clips" maxlength="120" autocomplete="off">
+        </div>
+
+        <div class="editor-actions">
+          <button type="button" class="btn" id="render-btn" disabled>Render clip</button>
+          <span id="render-status" class="notice" aria-live="polite"></span>
+        </div>
+        <p id="render-error" class="error" role="alert" aria-live="polite"></p>
+      </section>
+
+      <!-- 8. Clips list -->
+      <section class="card hidden" id="clips-panel" aria-labelledby="clips-heading">
+        <h2 id="clips-heading">Your clips</h2>
+        <div id="clips-list" class="clips-list"></div>
+        <p id="clips-empty" class="empty-state">No clips rendered yet.</p>
+      </section>
+      </div><!-- /#clipper-view -->
+
+      <!-- Video Downloader view (website version of the Termux Manan Downloader) -->
+      <div id="downloader-view" class="hidden">
+      <section class="info-box" aria-labelledby="download-know-heading">
+        <h2 id="download-know-heading">What to know</h2>
+        <ul>
+          <li>Downloads are best quality, up to 1080p.</li>
+          <li>TikTok often blocks downloads &mdash; if a TikTok link fails, try a YouTube or Facebook link instead.</li>
+          <li>Playlists are capped at 10 videos and come back as one zip file.</li>
+          <li>The download link works once and expires after 10 minutes &mdash; save the file right away.</li>
+        </ul>
+        <p><strong>Copyright:</strong> only download videos you have the right to download.</p>
+      </section>
+
+      <section class="card" aria-labelledby="download-heading">
+        <h2 id="download-heading">Download a video</h2>
+        <form id="download-form" class="url-form" novalidate>
+          <label class="hidden" for="download-url">Video link</label>
+          <input type="url" id="download-url" name="url" placeholder="https://www.tiktok.com/... or https://www.youtube.com/watch?v=... or https://www.facebook.com/..." autocomplete="off" spellcheck="false" enterkeyhint="go" required>
+          <button type="submit" class="btn" id="download-btn">Download</button>
+        </form>
+        <p id="download-platform" class="hint" aria-live="polite"></p>
+        <div class="field download-qty">
+          <label for="download-limit">How many videos? (0 = all, for playlists &mdash; max 10)</label>
+          <input type="number" id="download-limit" min="0" max="10" step="1" value="0">
+        </div>
+        <p id="download-error" class="error" role="alert" aria-live="polite"></p>
+        <p id="download-status" class="notice" aria-live="polite"></p>
+        <div id="download-result" class="download-result hidden">
+          <p><strong id="download-filename"></strong></p>
+          <p class="muted small" id="download-meta"></p>
+          <p class="muted small">Your download has started. The link works once and expires in 10 minutes &mdash; save the file now.</p>
+          <p><a id="download-link" href="#">Download file</a></p>
+        </div>
+      </section>
+      </div><!-- /#downloader-view -->
+    </main>
+
+    <!-- 9. Footer -->
+    <footer class="site-footer">
+      <section id="social-links" class="social-links hidden" aria-label="Manan Automation social links">
+        <p id="social-brand-line" class="social-brand-line hidden"></p>
+        <p id="social-tagline" class="social-tagline hidden"></p>
+        <p id="social-contact" class="social-contact hidden"><a id="social-contact-link" href="#" target="_blank" rel="noopener"></a></p>
+        <ul id="social-links-list" class="social-links-list"></ul>
+      </section>
+      <p>Clips are rendered 1080&times;1920 vertical, max 60 s, H.264 + AAC, loudness about &minus;15 LUFS.</p>
+    </footer>
+    </div><!-- /#app-view -->
+
+  </div>
+  <script src="app.js" defer></script>
+</body>
+</html>

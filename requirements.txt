@@ -1,0 +1,14 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+yt-dlp>=2024.4.7
+faster-whisper>=1.0.3
+# Pin av below 15: faster-whisper 1.2.1 is incompatible with av 19,
+# which removed the `metadata_errors` kwarg faster-whisper passes to
+# av.open — with av 19 every transcription fails at runtime.
+# Pinned exactly: faster-whisper 1.2.1 is incompatible with av>=15, and
+# av 14.4.0 has no cp312 wheel (and cannot build from source without
+# libav dev headers), so the range av>=11,<15 resolves to an
+# uninstallable version. 14.2.0 has a cp312 manylinux wheel.
+av==14.2.0
+# Optional fallback if faster-whisper is unavailable:
+# openai-whisper>=20240930

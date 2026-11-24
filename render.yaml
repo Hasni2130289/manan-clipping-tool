@@ -1,0 +1,23 @@
+# Render Blueprint for the Manan Clipping Tool.
+# Docker runtime is REQUIRED (not Render's native Python environment):
+# the Dockerfile installs ffmpeg + ffprobe, which Render's native
+# Python environment does not have, and the app cannot download,
+# transcribe or render video without them.
+services:
+  - type: web
+    name: manan-clipping-tool
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: APP_PASSWORD_HASH
+        sync: false
+      - key: WHISPER_MODEL
+        value: tiny
+      - key: MAX_DURATION
+        value: 3600
+      - key: MAX_FILE_MB
+        value: 512
+      - key: JOB_RETENTION_DAYS
+        value: 7
