@@ -1,8 +1,9 @@
 """URL validation, metadata fetching and video download via yt-dlp.
 
-Only YouTube and Facebook hosts are accepted. All yt-dlp failures are
-translated into short, human-readable messages — tracebacks are never
-surfaced to API callers.
+The clipper only accepts YouTube and Facebook hosts. The Video
+Downloader accepts those PLUS TikTok and Instagram (see
+DOWNLOAD_ALLOWED_HOSTS). All yt-dlp failures are translated into short,
+human-readable messages — tracebacks are never surfaced to API callers.
 """
 
 from __future__ import annotations
@@ -26,16 +27,19 @@ ALLOWED_HOSTS = {
 }
 
 # The Video Downloader accepts the same hosts as the clipper PLUS TikTok
-# (the Termux Manan Downloader's menu is TikTok / Facebook / YouTube
-# Shorts). The clipper's ALLOWED_HOSTS is intentionally unchanged —
-# TikTok is downloader-only, because clipping TikTok links is not
-# part of the clipper's job flow.
+# and Instagram (the Termux Manan Downloader's menu is TikTok / Facebook
+# / YouTube Shorts; Instagram was added as a fourth platform). The
+# clipper's ALLOWED_HOSTS is intentionally unchanged — Instagram links
+# are downloader-only, because clipping Instagram links is not part of
+# the clipper's job flow.
 DOWNLOAD_ALLOWED_HOSTS = ALLOWED_HOSTS | {
     "tiktok.com",
     "www.tiktok.com",
     "m.tiktok.com",
     "vt.tiktok.com",
     "vm.tiktok.com",
+    "instagram.com",
+    "www.instagram.com",
 }
 
 # At most this many playlist items per download. Free-tier disks are
@@ -125,6 +129,13 @@ def _friendly_error(stderr: str, url: str) -> str:
         # country the server runs in. Must come before the generic
         # "not available" check below, which would hide the real cause.
         return "This video isn't available in the server's country — try a different link."
+    if "instagram" in url.lower() and ("login" in text or "log in" in text
+            or "sign in" in text or "cookies" in text or "private" in text):
+        # Instagram only works for public posts/reels; anything that
+        # needs an account (or is private) fails in yt-dlp with a
+        # login/cookies error. Say so plainly instead of the generic
+        # "needs login" message.
+        return "This Instagram post needs login or is private — only public posts and reels can be downloaded."
     if "tiktok" in url.lower() and ("unsupported url" in text or "unable to" in text):
         return "TikTok blocked this download — TikTok restricts most downloads. Try a YouTube or Facebook link instead."
     if "private" in text:
@@ -200,6 +211,8 @@ def platform_for_url(url: str) -> str:
         return "Video"
     if "tiktok" in host:
         return "TikTok"
+    if "instagram" in host:
+        return "Instagram"
     if "facebook" in host or host.endswith("fb.watch"):
         return "Facebook"
     if "youtube" in host or host == "youtu.be":
@@ -223,8 +236,9 @@ def validate_download_url(url: str) -> str:
     host = (parsed.netloc or "").lower().split(":")[0]
     if host not in DOWNLOAD_ALLOWED_HOSTS:
         raise ValueError(
-            "Only YouTube, TikTok and Facebook video links are supported "
-            "(youtube.com, youtu.be, tiktok.com, facebook.com, fb.watch)."
+            "Only YouTube, TikTok, Facebook and Instagram video links "
+            "are supported (youtube.com, youtu.be, tiktok.com, "
+            "facebook.com, fb.watch, instagram.com)."
         )
     if not parsed.path or parsed.path in ("/",):
         raise ValueError("That link does not point to a video.")

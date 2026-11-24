@@ -42,10 +42,15 @@
     <header class="site-header">
       <div class="brand">
         <img class="brand-logo" src="assets/logo.jpg" alt="Manan Clipping Tool logo" width="52" height="52">
-        <h1>Manan Clipping Tool</h1>
+        <h1>Manan <span class="grad-text">Clipping</span> Tool</h1>
         <button type="button" class="btn btn-secondary btn-small logout-btn hidden" id="logout-btn">Log out</button>
       </div>
       <p class="subtitle">Make short vertical clips from a video link &mdash; or download the video itself (TikTok, Facebook, YouTube).</p>
+      <div class="hero-stats" aria-label="Clip specifications">
+        <div class="stat"><strong>1080p</strong><span>Max quality</span></div>
+        <div class="stat"><strong>60s</strong><span>Max clip</span></div>
+        <div class="stat"><strong>&minus;15</strong><span>LUFS audio</span></div>
+      </div>
     </header>
 
     <main>
@@ -186,11 +191,30 @@
         <p id="render-error" class="error" role="alert" aria-live="polite"></p>
       </section>
 
-      <!-- 8. Clips list -->
+      <!-- 8. Clips list — ONLY the current job's clips. Opening a new
+           video clears this panel until the new job is ready, so old
+           clips never sit next to new work. Finished clips from every
+           job live in History below, hidden until you open it. -->
       <section class="card hidden" id="clips-panel" aria-labelledby="clips-heading">
         <h2 id="clips-heading">Your clips</h2>
         <div id="clips-list" class="clips-list"></div>
         <p id="clips-empty" class="empty-state">No clips rendered yet.</p>
+      </section>
+
+      <!-- 9. History — finished clips from ALL your videos. Collapsed by
+           default: nothing shows here until you open it, so old clips
+           never appear next to new work. Delete is the only way a clip
+           leaves this list. -->
+      <section class="card" id="history-section" aria-labelledby="history-heading">
+        <div class="history-head">
+          <h2 id="history-heading">History</h2>
+          <button type="button" class="btn btn-secondary btn-small" id="history-toggle" aria-expanded="false" aria-controls="history-body">Show history</button>
+        </div>
+        <p class="hint">Finished clips from all your videos. They stay here until you delete them &mdash; opening a new video never removes them.</p>
+        <div id="history-body" class="hidden">
+          <div id="history-list" class="history-list"></div>
+          <p id="history-empty" class="empty-state">No finished clips yet.</p>
+        </div>
       </section>
       </div><!-- /#clipper-view -->
 
@@ -200,7 +224,10 @@
         <h2 id="download-know-heading">What to know</h2>
         <ul>
           <li>Downloads are best quality, up to 1080p.</li>
-          <li>TikTok often blocks downloads &mdash; if a TikTok link fails, try a YouTube or Facebook link instead.</li>
+          <li>YouTube usually works for public videos, but bot-checks can block some videos &mdash; try again later or try another platform.</li>
+          <li>TikTok usually works, but some links are blocked &mdash; try a YouTube or Facebook link instead.</li>
+          <li>Facebook only sometimes works for public videos and breaks often.</li>
+          <li>Instagram works for public posts and reels only &mdash; login-required or private content will fail.</li>
           <li>Playlists are capped at 10 videos and come back as one zip file.</li>
           <li>The download link works once and expires after 10 minutes &mdash; save the file right away.</li>
         </ul>
@@ -209,6 +236,17 @@
 
       <section class="card" aria-labelledby="download-heading">
         <h2 id="download-heading">Download a video</h2>
+        <!-- Platform picker: tapping a button selects that platform (the
+             URL box then accepts that platform's links). Any of the four
+             links also works without tapping a button — pasting a link
+             auto-detects its platform. -->
+        <div class="platform-btns" role="group" aria-label="Choose a platform">
+          <button type="button" class="platform-btn" data-platform="tiktok">TikTok Download</button>
+          <button type="button" class="platform-btn" data-platform="youtube">YouTube Download</button>
+          <button type="button" class="platform-btn" data-platform="facebook">Facebook Download</button>
+          <button type="button" class="platform-btn" data-platform="instagram">Instagram Download</button>
+        </div>
+        <p id="download-platform-hint" class="hint">Pick a platform, or just paste any TikTok, YouTube, Facebook or Instagram link &mdash; it will be detected automatically.</p>
         <form id="download-form" class="url-form" novalidate>
           <label class="hidden" for="download-url">Video link</label>
           <input type="url" id="download-url" name="url" placeholder="https://www.tiktok.com/... or https://www.youtube.com/watch?v=... or https://www.facebook.com/..." autocomplete="off" spellcheck="false" enterkeyhint="go" required>

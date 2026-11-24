@@ -71,7 +71,7 @@ The clip editor stays disabled until the video's real duration has loaded, so it
 
 The **Video downloader** tab is the website version of the Termux **Manan Downloader** (`manan_downloader.py` in the `Hasni2130289/manan-automation` repo): same idea — paste a link, get the video file — but in the browser instead of Termux, behind the same password gate.
 
-1. Open the **Video downloader** tab, paste a **TikTok, Facebook or YouTube** video link.
+1. Open the **Video downloader** tab, paste a **TikTok, YouTube, Facebook or Instagram** video link. Four platform buttons at the top select a platform (with a per-platform hint); pasting any of the four links also works without tapping a button — the platform is auto-detected.
 2. Set **how many videos** (0 = all, for playlists — max 10). For a single video the number does not matter.
 3. Pick a **Quality / Resolution** (Best up to 1080p, 1080p, 720p, 480p or 360p) and optionally a **Max size (MB)** — blank means no cap. If no format fits the size cap at that quality, the download fails with a clear message instead of a generic error.
 4. Press **Download**. The server fetches the complete video at the chosen quality and the file downloads in your browser.
@@ -85,14 +85,15 @@ What you get back: one MP4 file (named after the video title). A playlist comes 
 - **File size cap** is `MAX_FILE_MB` (default 2048 MB locally; the Render Blueprint sets 512 MB). Single videos longer than `MAX_DURATION` are rejected.
 - **YouTube** usually works for public videos, but age-restricted, login-required, private or bot-blocked videos fail with a clear message.
 - **Facebook** only sometimes works for public videos and breaks often; anything needing login will not download.
-- **TikTok often blocks downloads.** If a TikTok link fails, try a YouTube or Facebook link instead.
+- **TikTok** usually works, but some links are blocked — try a YouTube or Facebook link instead.
+- **Instagram** works for public posts and reels only — login-required or private content will fail. (From some servers Instagram refuses access entirely — "Instagram API is not granting access" — in which case try the same video on another platform.)
 - **Long downloads may time out** on the free tier — short-to-medium videos work best.
 
 **Copyright:** only download videos you have the right to download. Downloading other creators' content without permission can draw claims or strikes — the same warning as for clipping.
 
 ### API (summary)
 
-Auth is token-based: log in once, then send the token as `Authorization: Bearer <token>` on every API call except the public ones below. The frontend stores the token (localStorage) and shows its own login view when there is no token — page loads never redirect to a login page.
+Auth is token-based: log in once, then send the token as `Authorization: Bearer <token>` on every API call except the public ones below. Tokens are HMAC-signed with the password hash and live 30 days — they survive server restarts and free-tier sleep/wake cycles, so logging in once stays logged in (log out invalidates the token). The frontend stores the token (localStorage) and shows its own login view when there is no token — page loads never redirect to a login page.
 
 | Method | Endpoint | Description |
 |---|---|---|
@@ -105,6 +106,7 @@ Auth is token-based: log in once, then send the token as `Authorization: Bearer 
 | `GET` | `/api/jobs/{job_id}` | Full job incl. `transcript`, `highlights`, `clips` (token required) |
 | `POST` | `/api/jobs/{job_id}/render` `{"start","end","hook_text","cta_text"}` | Render a clip → `201` clip object (windows over 60 s are clamped to 60 s) (token required) |
 | `POST` | `/api/jobs/{job_id}/generate-clips` `{"count":3,"clip_seconds":30}` | Generate `count` (1–10) non-overlapping clips of `clip_seconds` (15–60 s) from the best moments → `{"clips":[{"start","end","score","reasons"}],"note","count","clip_seconds"}`; nothing is rendered — each clip stays editable in the editor before rendering (token required) |
+| `GET` | `/api/clips` | Every finished clip across all jobs, newest first (the History view) — `[{"id","job_id","job_title","url","start","end","hook_text","cta_text","filename","size","duration","created_at"}]` (token required) |
 | `GET` | `/api/clips/{clip_id}` | Download the rendered MP4 (public — clip IDs are unguessable UUIDs, and `<video>` previews / download links cannot send an auth header cross-origin; the jobs API stays token-gated so clips cannot be listed or discovered without the password) |
 | `DELETE` | `/api/clips/{clip_id}` | Delete a clip → `{"deleted": true}` (token required) |
 | `POST` | `/api/download` `{"url": "...", "limit": 0, "quality": "best", "max_size_mb": null}` | Download a video (token required) → `201 {"id","download_url","filename","size","content_type","platform","items","expires_in"}`; `limit` is the playlist quantity (0 = all, max 10); a playlist comes back as a zip. `quality` is `best`/`1080`/`720`/`480`/`360`; `max_size_mb` caps each format's size (blank = no cap) — if no format fits the cap at that quality the error says so. `400` for invalid URLs/quantity/quality/size, `502` when the platform blocks the download |
@@ -112,7 +114,7 @@ Auth is token-based: log in once, then send the token as `Authorization: Bearer 
 
 Unauthenticated calls to a token-gated endpoint return `401 {"detail": "Authentication required."}`. Static files (`/`, `/app.js`, `/style.css`, `/assets/logo.jpg`, `/login`) are public; the app shell is useless without the API.
 
-Only these hosts are accepted: `youtube.com`, `www.youtube.com`, `m.youtube.com`, `youtu.be`, `facebook.com`, `www.facebook.com`, `fb.watch`, `www.fb.watch`. Anything else is rejected with `400`. The Video Downloader additionally accepts TikTok (`tiktok.com`, `www.tiktok.com`, `m.tiktok.com`, `vt.tiktok.com`, `vm.tiktok.com`).
+Only these hosts are accepted: `youtube.com`, `www.youtube.com`, `m.youtube.com`, `youtu.be`, `facebook.com`, `www.facebook.com`, `fb.watch`, `www.fb.watch`. Anything else is rejected with `400`. The Video Downloader additionally accepts TikTok (`tiktok.com`, `www.tiktok.com`, `m.tiktok.com`, `vt.tiktok.com`, `vm.tiktok.com`) and Instagram (`instagram.com`, `www.instagram.com`).
 
 ---
 
@@ -260,7 +262,7 @@ If you prefer hosting it yourself instead of Render: in Hostinger hPanel → **V
 - **YouTube usually works for public videos**, but age-restricted, login-required, private, or bot-blocked videos can fail. If YouTube shows a bot check, the job fails with a clear message ("YouTube blocked this request (bot check)") — there is no workaround in the MVP; try a different video or try again later.
 - **Facebook only sometimes works for public videos and breaks often.** Facebook changes its video delivery frequently, so a link that works today may fail tomorrow. Private videos, groups-only videos and anything needing login will not download.
 - **Livestreams:** live capture while a stream is running is out of scope for the MVP. For livestreams, use the VOD link after the stream ends.
-- **Only YouTube and Facebook links are accepted.** Any other host is rejected with `400`.
+- **Only YouTube and Facebook links are accepted for clipping.** Any other host is rejected with `400`. The Video Downloader additionally accepts TikTok and Instagram links.
 - Transcription is English-optimised in the highlight keywords, but Whisper itself transcribes many languages; highlight scoring still works, keyword hits are just rarer for non-English speech.
 - If no Whisper package is installed, transcription is skipped: the job still becomes `ready` with the message "Transcription is unavailable on this install — you can still render clips with manual hook text and no captions." Rendering without a transcript produces a clip with hook + CTA only.
 
@@ -307,7 +309,7 @@ server.py                 FastAPI app: API + token auth + CORS + serves web/ as 
 config.py                 SOCIAL_LINKS — the one list of social links
 clipper/
   __init__.py
-  download.py             URL validation, yt-dlp metadata + download, Video Downloader (incl. TikTok hosts)
+  download.py             URL validation, yt-dlp metadata + download, Video Downloader (incl. TikTok + Instagram hosts)
   transcribe.py           faster-whisper (fallback openai-whisper)
   highlights.py           loudness / keyword / density highlight scoring
   render.py               9:16 ffmpeg render with ASS captions, hook, CTA, two-pass loudnorm

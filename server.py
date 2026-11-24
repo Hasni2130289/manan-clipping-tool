@@ -42,6 +42,7 @@ import json
 import os
 import secrets
 import shutil
+import time
 import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -109,10 +110,57 @@ app = FastAPI(title="Manan Clipping Tool", version=VERSION)
 DEFAULT_PASSWORD_HASH = ""
 APP_PASSWORD_HASH = os.environ.get("APP_PASSWORD_HASH", DEFAULT_PASSWORD_HASH).strip().lower()
 
-# Bearer tokens issued by POST /api/login, kept in memory only. No
-# cookies are used anywhere: cookies do not work cross-origin, and the
-# frontend may live on a different origin (a Muse Space) than this API.
-tokens: set[str] = set()
+# Bearer tokens issued by POST /api/login. They are STATELESS and
+# HMAC-signed with the password hash, so they survive a server restart
+# or a free-tier sleep/wake cycle: the old in-memory token set was wiped
+# on every restart, which logged the user out in the middle of a render
+# (the next poll got a 401 and the frontend showed the login view).
+# Format: "v1.<random>.<issued_at_unix>.<hex_hmac>". The HMAC key is
+# APP_PASSWORD_HASH itself, so changing the password invalidates every
+# token ever issued. Tokens live 30 days (far longer than any render);
+# logout adds the token to a best-effort in-memory denylist.
+_TOKEN_VERSION = "v1"
+_TOKEN_TTL_SECONDS = 30 * 24 * 3600  # 30 days
+_revoked_tokens: set[str] = set()
+
+
+def _issue_token() -> str:
+    """Mint a signed bearer token (only called after a successful login)."""
+    rand = secrets.token_urlsafe(24)
+    iat = int(time.time())
+    payload = f"{_TOKEN_VERSION}.{rand}.{iat}"
+    sig = hmac.new(
+        APP_PASSWORD_HASH.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    return f"{payload}.{sig}"
+
+
+def _validate_token(token: str) -> bool:
+    """True if the token is a well-formed, unexpired, unrevoked token
+    signed with the current password hash. Tokens issued before this
+    change (bare random strings) do not validate — the user logs in
+    once and the new token then survives restarts."""
+    if not token or token in _revoked_tokens:
+        return False
+    parts = token.split(".")
+    if len(parts) != 4 or parts[0] != _TOKEN_VERSION:
+        return False
+    _, rand, iat_s, sig = parts
+    try:
+        iat = int(iat_s)
+    except ValueError:
+        return False
+    now = int(time.time())
+    if iat > now + 300:  # issued in the future (beyond clock-skew leeway)
+        return False
+    if now - iat > _TOKEN_TTL_SECONDS:
+        return False
+    expected = hmac.new(
+        APP_PASSWORD_HASH.encode("utf-8"),
+        f"{_TOKEN_VERSION}.{rand}.{iat}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(expected, sig)
 
 # (method, path) pairs under /api/* that do NOT require a token.
 # Everything else under /api/* requires `Authorization: Bearer <token>`.
@@ -159,7 +207,7 @@ def _token_from_request(request: Request) -> str | None:
 
 def _is_authenticated(request: Request) -> bool:
     token = _token_from_request(request)
-    return bool(token) and token in tokens
+    return bool(token) and _validate_token(token)
 
 
 @app.middleware("http")
@@ -457,12 +505,16 @@ def _run_render(job_id: str, clip_id: str) -> None:
         if float(seg.get("end", 0)) > start and float(seg.get("start", 0)) < end
     ]
     # Only this clip's video section is downloaded — never the full video.
-    section_path = job_dir / "sections" / f"{clip_id}.mp4"
+    # The section file is keyed by its window (start-end), not by clip id,
+    # so re-rendering the same window reuses the already-downloaded
+    # section instead of downloading it again (~4 s saved per re-render).
+    section_path = job_dir / "sections" / f"{start:.1f}-{end:.1f}.mp4"
     fallback_note = ""
     try:
-        download_section(
-            job["url"], start, end, str(section_path), player_client="android"
-        )
+        if not (section_path.exists() and section_path.stat().st_size > 0):
+            download_section(
+                job["url"], start, end, str(section_path), player_client="android"
+            )
         render_source = str(section_path)
         render_start, render_end = 0.0, length
         segments = [
@@ -565,17 +617,21 @@ def login(payload: LoginRequest) -> JSONResponse:
     entered_hash = hashlib.sha256(payload.password.encode("utf-8")).hexdigest()
     if not hmac.compare_digest(entered_hash, APP_PASSWORD_HASH):
         raise HTTPException(status_code=401, detail="Wrong password")
-    token = secrets.token_urlsafe(32)
-    tokens.add(token)
+    token = _issue_token()
     return JSONResponse(content={"ok": True, "token": token})
 
 
 @app.post("/api/logout")
 def logout(request: Request) -> JSONResponse:
-    """Invalidate the bearer token from the Authorization header."""
+    """Invalidate the bearer token from the Authorization header.
+
+    The token is added to the in-memory denylist; the frontend also
+    drops its stored copy. (A server restart clears the denylist, but
+    the client no longer holds the token, so the session is over in
+    practice.)"""
     token = _token_from_request(request)
     if token:
-        tokens.discard(token)
+        _revoked_tokens.add(token)
     return JSONResponse(content={"ok": True})
 
 
@@ -737,6 +793,42 @@ def generate_job_clips(job_id: str, payload: GenerateClipsRequest) -> JSONRespon
         "count": len(clips),
         "clip_seconds": clip_seconds,
     })
+
+
+@app.get("/api/clips")
+def list_all_clips() -> list[dict]:
+    """Every finished clip across all jobs, newest first (History view).
+
+    Token-gated (unlike GET /api/clips/{id}, which is public so a
+    <video> preview can load it without an Authorization header).
+    Only clips whose render finished (size > 0) and whose file still
+    exists on disk are listed. Deleting happens per clip via
+    DELETE /api/clips/{id} — the only way a clip leaves this list.
+    """
+    out: list[dict] = []
+    for job in jobs.values():
+        for clip in job.get("clips", []):
+            if not clip.get("size"):
+                continue
+            path = _job_dir(job["id"]) / "clips" / f"{clip['id']}.mp4"
+            if not path.exists():
+                continue
+            out.append({
+                "id": clip["id"],
+                "job_id": job["id"],
+                "job_title": job.get("title") or "Untitled video",
+                "url": job.get("url"),
+                "start": clip.get("start"),
+                "end": clip.get("end"),
+                "hook_text": clip.get("hook_text", ""),
+                "cta_text": clip.get("cta_text", ""),
+                "filename": clip.get("filename", f"{clip['id']}.mp4"),
+                "size": clip.get("size"),
+                "duration": clip.get("duration"),
+                "created_at": clip.get("created_at"),
+            })
+    out.sort(key=lambda c: str(c.get("created_at", "")), reverse=True)
+    return out
 
 
 @app.get("/api/clips/{clip_id}")

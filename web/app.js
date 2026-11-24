@@ -36,12 +36,41 @@ const API_BASE_URL = "";
   ];
 
   // Hosts the downloader accepts: the clipper's hosts PLUS TikTok
-  // (the Termux Manan Downloader's menu is TikTok / Facebook / YouTube).
+  // and Instagram. (The Termux Manan Downloader's menu is TikTok /
+  // Facebook / YouTube Shorts; Instagram is the fourth platform.)
   var DOWNLOAD_SUPPORTED_HOSTS = SUPPORTED_HOSTS.concat([
     'tiktok.com', 'www.tiktok.com', 'm.tiktok.com',
-    'vt.tiktok.com', 'vm.tiktok.com'
+    'vt.tiktok.com', 'vm.tiktok.com',
+    'instagram.com', 'www.instagram.com'
   ]);
   var MAX_DOWNLOAD_ITEMS = 10;
+
+  // Per-platform hint + placeholder for the downloader URL box. The
+  // buttons only select a platform for the hint/placeholder — any of
+  // the four links is accepted regardless (auto-detection fallback).
+  var PLATFORM_INFO = {
+    tiktok: {
+      label: 'TikTok',
+      hint: 'Paste a TikTok video link. If one fails, try a YouTube or Facebook link instead.',
+      placeholder: 'https://www.tiktok.com/@user/video/...'
+    },
+    youtube: {
+      label: 'YouTube',
+      hint: 'Paste a public YouTube video link. Bot-checks can block some videos — try again later or use another platform.',
+      placeholder: 'https://www.youtube.com/watch?v=...'
+    },
+    facebook: {
+      label: 'Facebook',
+      hint: 'Paste a public Facebook video link. Facebook only sometimes works and breaks often.',
+      placeholder: 'https://www.facebook.com/...'
+    },
+    instagram: {
+      label: 'Instagram',
+      hint: 'Paste a public Instagram post or reel link. Login-required or private content will fail.',
+      placeholder: 'https://www.instagram.com/reel/...'
+    }
+  };
+  var selectedPlatform = ''; // '' = auto-detect
 
   // ---------- DOM references ----------
 
@@ -95,6 +124,14 @@ const API_BASE_URL = "";
   var clipsList = document.getElementById('clips-list');
   var clipsEmpty = document.getElementById('clips-empty');
 
+  // History: finished clips from ALL jobs. The section starts collapsed
+  // and loads nothing until the user opens it (see loadHistory below).
+  var historyToggle = document.getElementById('history-toggle');
+  var historyBody = document.getElementById('history-body');
+  var historyList = document.getElementById('history-list');
+  var historyEmpty = document.getElementById('history-empty');
+  var historyLoaded = false;
+
   // Tool tabs + Video Downloader view.
   var clipperView = document.getElementById('clipper-view');
   var downloaderView = document.getElementById('downloader-view');
@@ -107,6 +144,8 @@ const API_BASE_URL = "";
   var downloadQualityInput = document.getElementById('download-quality');
   var downloadMaxSizeInput = document.getElementById('download-max-size');
   var downloadPlatform = document.getElementById('download-platform');
+  var downloadPlatformHint = document.getElementById('download-platform-hint');
+  var platformBtns = document.querySelectorAll('.platform-btn');
   var downloadError = document.getElementById('download-error');
   var downloadStatus = document.getElementById('download-status');
   var downloadResult = document.getElementById('download-result');
@@ -592,6 +631,15 @@ const API_BASE_URL = "";
     setText(generateError, '');
     setText(generateStatus, '');
     generatedList.textContent = '';
+    // The new job replaces the workspace: clear the old job's panels so
+    // its clips/transcript/highlights never sit next to the new work.
+    // They reappear only when the new job is ready (renderJob shows
+    // them), and finished clips from every job stay in History.
+    clipsList.textContent = '';
+    hide(clipsPanel);
+    hide(transcriptPanel);
+    hide(highlightsPanel);
+    hide(editorPanel);
     progressFill.style.width = '0%';
     progressBar.setAttribute('aria-valuenow', '0');
     progressBar.removeAttribute('data-status');
@@ -610,8 +658,15 @@ const API_BASE_URL = "";
       setText(progressMessage, 'Could not refresh job: ' + err.message);
       return;
     }
+    var prevStatus = currentJob ? currentJob.status : null;
     currentJob = job;
     renderJob(job);
+    // A render just finished and History is open: refresh it so the
+    // new clip shows there too.
+    if (prevStatus === 'rendering' && job.status === 'done' && historyLoaded &&
+        !historyBody.classList.contains('hidden')) {
+      loadHistory();
+    }
     if (shouldPoll(job.status)) {
       startPolling();
     } else {
@@ -1092,6 +1147,9 @@ const API_BASE_URL = "";
         try {
           await fetchJson('/api/clips/' + encodeURIComponent(clip.id), { method: 'DELETE' });
           await refreshCurrentJob();
+          if (historyLoaded && !historyBody.classList.contains('hidden')) {
+            loadHistory();
+          }
         } catch (err) {
           setText(renderError, 'Could not delete clip: ' + err.message);
           deleteBtn.disabled = false;
@@ -1107,6 +1165,108 @@ const API_BASE_URL = "";
       clipsList.appendChild(item);
     });
   }
+
+  // ---------- History (finished clips from ALL jobs) ----------
+
+  // The History section starts collapsed and loads NOTHING until the
+  // user opens it: old clips must never appear next to new work on
+  // their own. Each row shows the video title, the clip window and a
+  // download link; Delete is the only way a clip leaves this list.
+  async function loadHistory() {
+    historyLoaded = true;
+    var clips;
+    try {
+      clips = await fetchJson('/api/clips');
+    } catch (err) {
+      setText(historyEmpty, 'Could not load history: ' + err.message);
+      show(historyEmpty);
+      return;
+    }
+    renderHistoryList(Array.isArray(clips) ? clips : []);
+  }
+
+  function renderHistoryList(clips) {
+    historyList.textContent = '';
+    if (!clips || clips.length === 0) {
+      setText(historyEmpty, 'No finished clips yet.');
+      show(historyEmpty);
+      return;
+    }
+    hide(historyEmpty);
+    clips.forEach(function (clip) {
+      var item = document.createElement('div');
+      item.className = 'history-item';
+
+      var info = document.createElement('div');
+      info.className = 'history-info';
+
+      var title = document.createElement('strong');
+      title.className = 'history-title';
+      setText(title, clip.job_title || clip.url || 'Untitled video');
+      info.appendChild(title);
+
+      var meta = document.createElement('p');
+      meta.className = 'muted small';
+      var metaParts = [];
+      if (clip.start !== undefined && clip.end !== undefined) {
+        metaParts.push(formatTimeRange(clip.start, clip.end));
+      }
+      if (clip.duration) { metaParts.push(formatTime(clip.duration)); }
+      if (clip.size) { metaParts.push(formatBytes(clip.size)); }
+      if (clip.created_at) {
+        metaParts.push(new Date(clip.created_at).toLocaleString());
+      }
+      setText(meta, metaParts.join(' · '));
+      info.appendChild(meta);
+
+      var actions = document.createElement('div');
+      actions.className = 'clip-actions';
+
+      var download = document.createElement('a');
+      download.className = 'btn btn-small';
+      download.href = apiUrl('/api/clips/' + encodeURIComponent(clip.id));
+      download.setAttribute('download', clip.filename || 'clip.mp4');
+      setText(download, 'Download');
+
+      var deleteBtn = document.createElement('button');
+      deleteBtn.type = 'button';
+      deleteBtn.className = 'btn btn-danger btn-small';
+      setText(deleteBtn, 'Delete');
+      deleteBtn.addEventListener('click', async function () {
+        if (!window.confirm('Delete this clip? This cannot be undone.')) { return; }
+        deleteBtn.disabled = true;
+        try {
+          await fetchJson('/api/clips/' + encodeURIComponent(clip.id), { method: 'DELETE' });
+          await loadHistory();
+          if (currentJobId) { await refreshCurrentJob(); }
+        } catch (err) {
+          setText(renderError, 'Could not delete clip: ' + err.message);
+          deleteBtn.disabled = false;
+        }
+      });
+
+      actions.appendChild(download);
+      actions.appendChild(deleteBtn);
+      info.appendChild(actions);
+
+      item.appendChild(info);
+      historyList.appendChild(item);
+    });
+  }
+
+  historyToggle.addEventListener('click', function () {
+    var isHidden = historyBody.classList.contains('hidden');
+    if (isHidden) {
+      show(historyBody);
+      historyToggle.setAttribute('aria-expanded', 'true');
+      setText(historyToggle, 'Hide history');
+      loadHistory();
+    } else {
+      hide(historyBody);
+      historyToggle.setAttribute('aria-expanded', 'false');
+      setText(historyToggle, 'Show history');
+    }
+  });
 
   // ---------- Tool tabs ----------
 
@@ -1130,6 +1290,28 @@ const API_BASE_URL = "";
 
   // ---------- Video Downloader ----------
 
+  // Platform picker: tapping a button selects that platform (the URL
+  // box then accepts that platform's links, with a per-platform hint
+  // and placeholder). Any of the four links is accepted regardless —
+  // pasting a link auto-detects its platform and selects its button.
+  function selectPlatform(key) {
+    if (!PLATFORM_INFO[key]) { return; }
+    selectedPlatform = key;
+    Array.prototype.forEach.call(platformBtns, function (btn) {
+      btn.classList.toggle('active', btn.getAttribute('data-platform') === key);
+      btn.setAttribute('aria-pressed', btn.getAttribute('data-platform') === key ? 'true' : 'false');
+    });
+    setText(downloadPlatformHint, PLATFORM_INFO[key].hint);
+    downloadUrlInput.placeholder = PLATFORM_INFO[key].placeholder;
+  }
+
+  Array.prototype.forEach.call(platformBtns, function (btn) {
+    btn.addEventListener('click', function () {
+      selectPlatform(btn.getAttribute('data-platform'));
+      downloadUrlInput.focus();
+    });
+  });
+
   // Auto-detected platform label under the URL field ("Detected: TikTok").
   function downloadPlatformForUrl(value) {
     var parsed;
@@ -1140,6 +1322,7 @@ const API_BASE_URL = "";
     }
     var host = parsed.hostname.toLowerCase();
     if (host.indexOf('tiktok') !== -1) { return 'TikTok'; }
+    if (host.indexOf('instagram') !== -1) { return 'Instagram'; }
     if (host.indexOf('facebook') !== -1 || host === 'fb.watch' || host === 'www.fb.watch') { return 'Facebook'; }
     if (host.indexOf('youtube') !== -1 || host === 'youtu.be') { return 'YouTube'; }
     return '';
@@ -1148,6 +1331,11 @@ const API_BASE_URL = "";
   downloadUrlInput.addEventListener('input', function () {
     var label = downloadPlatformForUrl(downloadUrlInput.value.trim());
     setText(downloadPlatform, label ? 'Detected: ' + label : '');
+    // Pasting a recognisable link selects its platform button too.
+    if (label) {
+      var key = label.toLowerCase();
+      if (PLATFORM_INFO[key]) { selectPlatform(key); }
+    }
   });
 
   function isSupportedDownloadUrl(value) {
@@ -1169,7 +1357,7 @@ const API_BASE_URL = "";
       return;
     }
     if (!isSupportedDownloadUrl(url)) {
-      setText(downloadError, 'That doesn’t look like a YouTube, TikTok or Facebook video link. Paste a link from youtube.com, youtu.be, tiktok.com, facebook.com or fb.watch.');
+      setText(downloadError, 'That doesn’t look like a TikTok, YouTube, Facebook or Instagram video link. Paste a link from tiktok.com, youtube.com, youtu.be, facebook.com, fb.watch or instagram.com.');
       return;
     }
     var limit = parseInt(downloadLimitInput.value, 10);

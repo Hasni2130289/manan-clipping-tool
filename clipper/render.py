@@ -259,7 +259,12 @@ def render_clip(
             "-vf", video_filter,
             "-af", _loudnorm_filter(source_path, start, end),
             "-ac", "2",
-            "-c:v", "libx264", "-crf", "19", "-preset", "veryfast",
+            # superfast (not veryfast): ~26% faster encode at the same
+            # CRF 19 / 1080x1920 quality — measured 12.8 s vs 17.3 s for
+            # a 20 s clip, same -15.07 LUFS. File size roughly doubles
+            # (16 MB vs 9 MB per 20 s), which is the trade for speed;
+            # ultrafast would be faster still but ~3x the size.
+            "-c:v", "libx264", "-crf", "19", "-preset", "superfast",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "128k",
             "-movflags", "+faststart",
