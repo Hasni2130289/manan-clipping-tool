@@ -109,6 +109,7 @@ const API_BASE_URL = "";
   var clipLengthEl = document.getElementById('clip-length');
   var hookInput = document.getElementById('hook-text');
   var ctaInput = document.getElementById('cta-text');
+  var captionsToggle = document.getElementById('captions-toggle');
   var renderBtn = document.getElementById('render-btn');
   var renderStatus = document.getElementById('render-status');
   var renderError = document.getElementById('render-error');
@@ -941,7 +942,8 @@ const API_BASE_URL = "";
           start: start,
           end: end,
           hook_text: hookInput.value.trim(),
-          cta_text: ctaInput.value.trim()
+          cta_text: ctaInput.value.trim(),
+          captions: captionsToggle.checked
         })
       });
       // The job goes to "rendering"; poll until it is done, then refresh.
@@ -1121,6 +1123,12 @@ const API_BASE_URL = "";
         setText(ctaP, clip.cta_text);
         info.appendChild(ctaP);
       }
+      if (clip.theme) {
+        var themeP = document.createElement('p');
+        themeP.className = 'muted small';
+        setText(themeP, 'Background: ' + clip.theme + (clip.background ? ' (' + clip.background + ')' : ''));
+        info.appendChild(themeP);
+      }
       if (clip.filename) {
         var fileP = document.createElement('p');
         fileP.className = 'muted small';
@@ -1213,6 +1221,7 @@ const API_BASE_URL = "";
       }
       if (clip.duration) { metaParts.push(formatTime(clip.duration)); }
       if (clip.size) { metaParts.push(formatBytes(clip.size)); }
+      if (clip.theme) { metaParts.push('Background: ' + clip.theme); }
       if (clip.created_at) {
         metaParts.push(new Date(clip.created_at).toLocaleString());
       }

@@ -67,7 +67,7 @@ from clipper.download import (
 )
 from config import BRAND_LINE, CONTACT_PHONE, CONTACT_URL, SOCIAL_LINKS, TAGLINE
 from clipper.highlights import generate_clips, get_loudness_curve, suggest_highlights
-from clipper.render import MAX_CLIP_SECONDS, render_clip
+from clipper.render import MAX_CLIP_SECONDS, render_clip, theme_for_index
 from clipper.transcribe import TranscriptionUnavailable, transcribe
 
 VERSION = "0.1.0"
@@ -542,6 +542,8 @@ def _run_render(job_id: str, clip_id: str) -> None:
             clip.get("cta_text", ""),
             str(output_path),
             segments=segments,
+            captions=clip.get("captions", True),
+            theme_index=clip.get("theme_index", 0),
         )
         # Update the clip record in place so GET /api/jobs/{id} -> clips[]
         # shows the finished file (size/duration) after the render.
@@ -571,6 +573,9 @@ class RenderRequest(BaseModel):
     end: float
     hook_text: str = ""
     cta_text: str = ""
+    # Show the spoken words as text on the video (ASS captions). The
+    # editor has a Captions toggle for this; default ON.
+    captions: bool = True
 
 
 class GenerateClipsRequest(BaseModel):
@@ -724,12 +729,20 @@ def render_job_clip(
         # Clamp, don't reject: the contract allows windows over 60 s.
         end = start + MAX_CLIP_SECONDS
     clip_id = uuid.uuid4().hex[:16]
+    # The background + text colour rotate deterministically by clip
+    # index within the job, so consecutive clips never look the same.
+    theme_index = len(job["clips"])
+    theme = theme_for_index(theme_index)
     clip: dict = {
         "id": clip_id,
         "start": start,
         "end": end,
         "hook_text": payload.hook_text or "",
         "cta_text": payload.cta_text or "",
+        "captions": payload.captions,
+        "theme_index": theme_index,
+        "theme": theme["name"],
+        "background": theme["background"],
         "filename": f"{clip_id}.mp4",
         "size": 0,
         "duration": round(end - start, 2),
@@ -822,6 +835,9 @@ def list_all_clips() -> list[dict]:
                 "end": clip.get("end"),
                 "hook_text": clip.get("hook_text", ""),
                 "cta_text": clip.get("cta_text", ""),
+                "captions": clip.get("captions", True),
+                "theme": clip.get("theme", ""),
+                "background": clip.get("background", ""),
                 "filename": clip.get("filename", f"{clip['id']}.mp4"),
                 "size": clip.get("size"),
                 "duration": clip.get("duration"),

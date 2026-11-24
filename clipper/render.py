@@ -5,11 +5,20 @@ hook text at the top, CTA at the bottom, and (when available) transcript
 captions above the CTA. Clip length is clamped to 60 seconds and the
 result is validated with ffprobe before it is returned.
 
-Layout is the middle-band style: the source video is scaled DOWN to at
-most 1080 px wide with lanczos and NEVER upscaled, then centred on a
-deep-purple (#390039) 1080x1920 background, so a 16:9 source plays in a
-sharp middle band with the hook on top and the CTA at the bottom. A
-source that is already vertical 1080x1920 fills the frame as before.
+Layout is full-width: the source video is scaled to the full 1080 px
+width with lanczos (upscaled with a light unsharp when the source is
+narrower than 1080, so small sources still fill the frame crisply) and
+centred vertically on a 1080x1920 background, so a 16:9 source plays in
+a 1080x608 band, a 4:5 source in a 1080x1350 band, and a vertical
+1080x1920 source fills the frame. The old centre-crop upscale
+(scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920)
+is never used — it stretched a 607x1080 centre slice ~1.78x and caused
+the pixelation the user reported.
+
+The background and the text colour rotate per clip (THEMES): every clip
+in a job gets a different pairing, so consecutive clips never look the
+same. Hook and CTA text are big and bold, like the approved v4 demo
+frame («WAIT FOR END TWIST» / «SUBSCRIBE FOR MORE»).
 """
 
 from __future__ import annotations
@@ -22,9 +31,40 @@ import tempfile
 MAX_CLIP_SECONDS = 60.0
 TARGET_WIDTH = 1080
 TARGET_HEIGHT = 1920
-# Deep-purple background for the middle-band layout (same colour as the
-# approved v4 Shorts background).
-BAND_BG_COLOR = "0x390039"
+
+# Background + text-colour pairings. Every theme is dark enough that
+# light text reads on it, and the ASS outline (black) protects the text
+# further. The server rotates through these by clip index within a job,
+# so consecutive clips always differ. "background" is the display string
+# shown on the clip card; "bg" (solids) / "c0"+"c1" (gradients) are the
+# ffmpeg colour values (RRGGBB, no #).
+THEMES = [
+    {"name": "Deep Purple", "kind": "solid", "bg": "390039",
+     "background": "#390039", "text": "FFFFFF"},
+    {"name": "Midnight Gold", "kind": "solid", "bg": "0B1E3A",
+     "background": "#0B1E3A", "text": "FFD166"},
+    {"name": "Dark Teal", "kind": "solid", "bg": "062E2B",
+     "background": "#062E2B", "text": "7FE7FF"},
+    {"name": "Crimson Night", "kind": "solid", "bg": "3A0B14",
+     "background": "#3A0B14", "text": "FFFFFF"},
+    {"name": "Forest Lime", "kind": "solid", "bg": "0E2A12",
+     "background": "#0E2A12", "text": "B6FF5C"},
+    {"name": "Sunset Glow", "kind": "gradient", "c0": "2B0A3D", "c1": "7A2E0D",
+     "background": "#2B0A3D → #7A2E0D", "text": "FFE8B0"},
+]
+
+
+def theme_for_index(index: int) -> dict:
+    """Theme for a clip index: deterministic rotation through THEMES."""
+    return THEMES[int(index) % len(THEMES)]
+
+
+def _ass_color(rgb_hex: str) -> str:
+    """Convert RRGGBB to an ASS colour (&HBBGGRR, fully opaque)."""
+    rgb_hex = (rgb_hex or "FFFFFF").strip().lstrip("#")
+    if len(rgb_hex) != 6:
+        rgb_hex = "FFFFFF"
+    return f"&H00{rgb_hex[4:6]}{rgb_hex[2:4]}{rgb_hex[0:2]}"
 
 
 def _ass_time(seconds: float) -> str:
@@ -80,12 +120,21 @@ def _build_ass(
     start: float,
     end: float,
     font: str,
+    text_color: str = "&H00FFFFFF",
+    captions: bool = True,
+    hook_fontsize: int = 120,
+    hook_margin_v: int = 100,
 ) -> str:
     """Build ASS subtitle content for one clip.
 
-    Captions sit at the bottom with a high MarginV, the CTA sits at the
-    bottom with a lower MarginV (so they never overlap), and the hook
-    is top-aligned for the whole clip.
+    The hook is big and bold at the top (120 px, like the approved v4
+    demo frame; smaller — 84 px — when the video band is tall and the
+    top band is short, so the hook never spills onto the video), the
+    CTA is big at the bottom (96 px), and the spoken-word captions sit
+    above the CTA (48 px). When captions is False the transcript
+    segments are left out entirely — the hook and CTA still render.
+    Margins keep the three text zones apart: hook MarginV 100 (50 when
+    small), captions MarginV 270, CTA MarginV 30.
     """
     clip_duration = end - start
     lines = [
@@ -100,10 +149,11 @@ def _build_ass(
         "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
         "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding",
-        # White text, black outline, semi-transparent black box.
-        f"Style: Hook,{font},64,&H00FFFFFF,&H000000FF,&H80000000,&H80000000,1,0,0,0,100,100,0,0,1,3,0,8,60,60,120,1",
-        f"Style: Caption,{font},46,&H00FFFFFF,&H000000FF,&H80000000,&H80000000,1,0,0,0,100,100,0,0,1,3,0,2,60,60,170,1",
-        f"Style: CTA,{font},50,&H00FFFFFF,&H000000FF,&H80000000,&H80000000,1,0,0,0,100,100,0,0,1,3,0,2,60,60,40,1",
+        # Big bold text in the theme colour, black outline, semi-transparent
+        # black box. Hook 120 px / CTA 96 px match the v4 demo frame.
+        f"Style: Hook,{font},{hook_fontsize},{text_color},&H000000FF,&H80000000,&H80000000,1,0,0,0,100,100,0,0,1,5,0,8,60,60,{hook_margin_v},1",
+        f"Style: Caption,{font},48,{text_color},&H000000FF,&H80000000,&H80000000,1,0,0,0,100,100,0,0,1,3,0,2,60,60,270,1",
+        f"Style: CTA,{font},96,{text_color},&H000000FF,&H80000000,&H80000000,1,0,0,0,100,100,0,0,1,4,0,2,60,60,30,1",
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
@@ -113,7 +163,7 @@ def _build_ass(
             f"Dialogue: 0,{_ass_time(0)},{_ass_time(clip_duration)},Hook,,0,0,0,,"
             f"{escape_ass_text(hook_text)}"
         )
-    if segments:
+    if captions and segments:
         for seg in segments:
             seg_start = float(seg.get("start", 0)) - start
             seg_end = float(seg.get("end", 0)) - start
@@ -151,6 +201,70 @@ def _ffprobe_info(path: str) -> dict:
     if result.returncode != 0:
         raise RuntimeError(f"ffprobe failed on rendered clip: {result.stderr.strip()}")
     return json.loads(result.stdout)
+
+
+def _probe_source(path: str) -> tuple[int | None, int | None, bool]:
+    """Probe a source file: (width, height, has_audio).
+
+    The width decides whether the render upscales (with unsharp) or
+    downscales; has_audio decides whether the render maps an audio
+    stream at all, so silent sources render instead of failing on
+    `-map 1:a`. Returns (None, None, False) when probing fails.
+    """
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-show_entries", "stream=codec_type,width,height",
+            "-of", "json",
+            path,
+        ],
+        capture_output=True, text=True, timeout=60,
+    )
+    if result.returncode != 0:
+        return None, None, False
+    try:
+        streams = json.loads(result.stdout).get("streams", [])
+    except json.JSONDecodeError:
+        return None, None, False
+    width = height = None
+    has_audio = False
+    for stream in streams:
+        if stream.get("codec_type") == "video" and width is None:
+            width = stream.get("width")
+            height = stream.get("height")
+        if stream.get("codec_type") == "audio":
+            has_audio = True
+    return width, height, has_audio
+
+
+def _make_background(theme: dict, tmp_dir: str) -> str:
+    """Render the theme's 1080x1920 background to a PNG (ffmpeg lavfi).
+
+    Solids use the `color` source; the gradient theme uses the
+    `gradients` source (vertical, top colour to bottom colour). No
+    external assets — the PNG is generated fresh for every render.
+    """
+    bg_path = os.path.join(tmp_dir, "bg.png")
+    if theme.get("kind") == "gradient":
+        lavfi = (
+            "gradients=s=1080x1920"
+            f":c0=0x{theme['c0']}:c1=0x{theme['c1']}"
+            ":x0=540:y0=0:x1=540:y1=1920"
+        )
+    else:
+        lavfi = f"color=c=0x{theme['bg']}:s=1080x1920"
+    result = subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", lavfi,
+         "-frames:v", "1", bg_path],
+        capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode != 0 or not os.path.exists(bg_path):
+        detail = (result.stderr or "").strip().splitlines()
+        raise RuntimeError(
+            "Failed to generate the clip background: "
+            + (detail[-1] if detail else "unknown ffmpeg error")
+        )
+    return bg_path
 
 
 def _measure_loudness(source_path: str, start: float, end: float) -> dict | None:
@@ -225,11 +339,13 @@ def render_clip(
     cta_text: str,
     output_path: str,
     segments: list[dict] | None = None,
+    captions: bool = True,
+    theme_index: int = 0,
 ) -> dict:
     """Render a 9:16 clip from source_path[start:end].
 
     Returns {"path": str, "duration": float, "width": int,
-             "height": int, "size": int}.
+             "height": int, "size": int, "theme": str, "background": str}.
     Raises ValueError for bad windows and RuntimeError on ffmpeg/ffprobe
     failure or on a validation mismatch.
     """
@@ -245,8 +361,26 @@ def render_clip(
         end = start + MAX_CLIP_SECONDS
     clip_duration = end - start
 
+    theme = theme_for_index(theme_index)
     font = _detect_font()
-    ass_content = _build_ass(hook_text or "", cta_text or "", segments, start, end, font)
+    bg_path = None
+    # Hook sizing adapts to the video band: a 16:9 source leaves a
+    # 656 px top band, so the hook is 120 px like the v4 demo frame; a
+    # tall band (4:5: 285 px, 9:16: none) leaves little room above the
+    # video, so the hook drops to 84 px and hugs the top instead of
+    # spilling onto the video. The band height follows the source
+    # aspect at full 1080 px width (height rounded even, as scale does).
+    src_width, src_height, has_audio = _probe_source(source_path)
+    hook_fontsize, hook_margin_v = 120, 100
+    if src_width and src_height:
+        video_h = int(round(1080 * src_height / src_width / 2.0) * 2)
+        if (TARGET_HEIGHT - video_h) // 2 < 360:
+            hook_fontsize, hook_margin_v = 84, 50
+    ass_content = _build_ass(
+        hook_text or "", cta_text or "", segments, start, end, font,
+        text_color=_ass_color(theme["text"]), captions=captions,
+        hook_fontsize=hook_fontsize, hook_margin_v=hook_margin_v,
+    )
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     tmp_dir = tempfile.mkdtemp(prefix="clip-render-")
@@ -254,36 +388,43 @@ def render_clip(
     try:
         with open(ass_path, "w", encoding="utf-8") as handle:
             handle.write(ass_content)
-        # Middle-band layout (never upscale): scale the video down to at
-        # most 1080 px wide with lanczos (trunc to an even width for
-        # yuv420p; height -2 keeps the aspect ratio), then centre it on
-        # the deep-purple 1080x1920 canvas. A 16:9 1080p source becomes a
-        # 1080x608 band at y 656-1264, leaving the hook (top, MarginV
-        # 120) and the captions/CTA (bottom, MarginV 170/40) on the
-        # purple bands with no overlap. A vertical 1080x1920 source
-        # fills the frame exactly as before.
+        bg_path = _make_background(theme, tmp_dir)
+        # Full-width layout: scale the video to exactly 1080 px wide
+        # with lanczos (height follows the aspect, even-rounded). A
+        # 16:9 source becomes a 1080x608 band centred vertically
+        # (y 656-1264), a 4:5 source a 1080x1350 band (y 285-1635), and
+        # a vertical 1080x1920 source fills the frame. When the source
+        # is narrower than 1080 it is scaled UP with a light unsharp so
+        # small sources (e.g. 640x360) still fill the frame crisply —
+        # never the old centre-crop upscale, which stretched a
+        # 607x1080 centre slice and caused the pixelation.
+        scale_filter = "scale=1080:-2:flags=lanczos"
+        if src_width is not None and src_width < TARGET_WIDTH:
+            scale_filter += ",unsharp=5:5:0.6:5:5:0.0"
         video_filter = (
-            "scale='trunc(min(1080,iw)/2)*2':-2:flags=lanczos,"
-            f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color={BAND_BG_COLOR},"
-            "fps=30,"
-            f"ass={ass_path}"
+            f"[1:v]{scale_filter},fps=30[fg];"
+            f"[0:v][fg]overlay=(W-w)/2:(H-h)/2,ass={ass_path},fps=30[v]"
         )
         cmd = [
             "ffmpeg", "-y", "-v", "error",
+            "-framerate", "30", "-loop", "1", "-t", str(clip_duration),
+            "-i", bg_path,
             "-ss", str(start), "-to", str(end),
             "-i", source_path,
-            "-vf", video_filter,
-            "-af", _loudnorm_filter(source_path, start, end),
-            "-ac", "2",
+            "-filter_complex", video_filter,
+            "-map", "[v]",
+        ]
+        if has_audio:
+            cmd += [
+                "-map", "1:a",
+                "-af", _loudnorm_filter(source_path, start, end),
+                "-ac", "2", "-c:a", "aac", "-b:a", "128k",
+            ]
+        cmd += [
             # veryfast + CRF 18: better quality than superfast/CRF 19 on
             # busy game footage (finer quantisation, more motion search).
-            # Measured 21.9 s for a 20 s clip including the two-pass
-            # loudnorm measurement (the old superfast/CRF 19 build took
-            # 23.4 s for the same window — the middle-band layout
-            # encodes fewer pixels, which pays for the slower preset).
             "-c:v", "libx264", "-crf", "18", "-preset", "veryfast",
             "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "128k",
             "-movflags", "+faststart",
             output_path,
         ]
@@ -319,11 +460,17 @@ def render_clip(
             "width": int(width),
             "height": int(height),
             "size": os.path.getsize(output_path),
+            "theme": theme["name"],
+            "background": theme["background"],
         }
     finally:
+        for path in (ass_path, bg_path):
+            try:
+                if path and os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
         try:
-            if os.path.exists(ass_path):
-                os.remove(ass_path)
             os.rmdir(tmp_dir)
         except OSError:
             pass
