@@ -19,8 +19,10 @@ Job lifecycle (async via FastAPI BackgroundTasks):
     any failure -> error (with a human-readable message)
 
 Jobs live in an in-memory dict and are persisted per job under
-JOB_DIR/<job_id>/ (meta.json, transcript.json, source.mp4, clips/<id>.mp4).
-Terminal jobs (ready/done/error) older than JOB_RETENTION_DAYS are
+JOB_DIR/<job_id>/ (meta.json, transcript.json, audio.m4a, sections/<id>.mp4,
+clips/<id>.mp4). A clipping job NEVER downloads the full video: only
+audio-only for the transcript/highlights, plus one video section per
+rendered clip. Terminal jobs (ready/done/error) older than JOB_RETENTION_DAYS are
 pruned at startup and whenever a job reaches a terminal state.
 
 Video Downloader (POST /api/download): downloads a YouTube / TikTok /
@@ -52,7 +54,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from clipper.download import (
+    QUALITY_HEIGHTS,
+    download_audio,
     download_files,
+    download_section,
     download_video,
     fetch_metadata,
     platform_for_url,
@@ -60,7 +65,7 @@ from clipper.download import (
     validate_url,
 )
 from config import BRAND_LINE, CONTACT_PHONE, CONTACT_URL, SOCIAL_LINKS, TAGLINE
-from clipper.highlights import get_loudness_curve, suggest_highlights
+from clipper.highlights import generate_clips, get_loudness_curve, suggest_highlights
 from clipper.render import MAX_CLIP_SECONDS, render_clip
 from clipper.transcribe import TranscriptionUnavailable, transcribe
 
@@ -379,10 +384,10 @@ def _run_pipeline(job_id: str) -> None:
     if job is None:
         return
     job_dir = _job_dir(job_id)
-    source_path = job_dir / "source.mp4"
+    audio_path = job_dir / "audio.m4a"
     try:
         _set_status(job, "downloading", 10, "Fetching video info…")
-        meta = fetch_metadata(job["url"])
+        meta = fetch_metadata(job["url"], player_client="android")
         job["title"] = meta.get("title")
         job["duration"] = meta.get("duration")
         job["thumbnail"] = meta.get("thumbnail")
@@ -392,11 +397,14 @@ def _run_pipeline(job_id: str) -> None:
                 f"This video is {duration / 3600:.1f} hours long, "
                 f"over the {MAX_DURATION / 3600:.1f} hour limit."
             )
-        _set_status(job, "downloading", 25, "Downloading video…")
-        download_video(job["url"], str(source_path), MAX_FILE_MB)
+        # Clipping never downloads the full video: audio-only is enough
+        # for the transcript + highlight detection (small and fast), and
+        # each clip's video is fetched as just its section at render time.
+        _set_status(job, "downloading", 25, "Downloading audio…")
+        download_audio(job["url"], str(audio_path), player_client="android")
         _set_status(job, "transcribing", 60, "Transcribing audio…")
         try:
-            transcript = transcribe(str(source_path), model=WHISPER_MODEL)
+            transcript = transcribe(str(audio_path), model=WHISPER_MODEL)
         except TranscriptionUnavailable:
             # Transcription is optional: the job is still usable for
             # manual renders (hook + CTA, no captions).
@@ -412,7 +420,7 @@ def _run_pipeline(job_id: str) -> None:
         _set_status(job, "transcribing", 85, "Finding highlights…")
         loudness = None
         try:
-            loudness = get_loudness_curve(str(source_path))
+            loudness = get_loudness_curve(str(audio_path))
         except Exception:
             loudness = None
         job["highlights"] = suggest_highlights(
@@ -437,18 +445,47 @@ def _run_render(job_id: str, clip_id: str) -> None:
     clip = next((c for c in job.get("clips", []) if c["id"] == clip_id), None)
     if clip is None:
         return
-    source_path = _job_dir(job_id) / "source.mp4"
-    output_path = _job_dir(job_id) / "clips" / f"{clip_id}.mp4"
+    job_dir = _job_dir(job_id)
+    output_path = job_dir / "clips" / f"{clip_id}.mp4"
+    start = float(clip["start"])
+    end = float(clip["end"])
+    length = end - start
+    # Transcript segments overlapping the clip, shifted so 0 == the
+    # section file's start (the section starts exactly at clip start).
+    overlapping = [
+        seg for seg in job.get("transcript", [])
+        if float(seg.get("end", 0)) > start and float(seg.get("start", 0)) < end
+    ]
+    # Only this clip's video section is downloaded — never the full video.
+    section_path = job_dir / "sections" / f"{clip_id}.mp4"
+    fallback_note = ""
     try:
+        download_section(
+            job["url"], start, end, str(section_path), player_client="android"
+        )
+        render_source = str(section_path)
+        render_start, render_end = 0.0, length
         segments = [
-            seg for seg in job.get("transcript", [])
-            if float(seg.get("end", 0)) > clip["start"]
-            and float(seg.get("start", 0)) < clip["end"]
+            {**seg,
+             "start": float(seg.get("start", 0)) - start,
+             "end": float(seg.get("end", 0)) - start}
+            for seg in overlapping
         ]
+    except (ValueError, RuntimeError, FileNotFoundError):
+        # Section downloads are not supported by every platform: fall
+        # back to the full video for this clip (the old behaviour).
+        fallback_note = " (section download unavailable — used the full video)"
+        source_path = job_dir / "source.mp4"
+        if not source_path.exists():
+            download_video(job["url"], str(source_path), MAX_FILE_MB)
+        render_source = str(source_path)
+        render_start, render_end = start, end
+        segments = overlapping
+    try:
         info = render_clip(
-            str(source_path),
-            clip["start"],
-            clip["end"],
+            render_source,
+            render_start,
+            render_end,
             clip.get("hook_text", ""),
             clip.get("cta_text", ""),
             str(output_path),
@@ -459,7 +496,7 @@ def _run_render(job_id: str, clip_id: str) -> None:
         clip["size"] = info["size"]
         clip["duration"] = info["duration"]
         clip["filename"] = output_path.name
-        _set_status(job, "done", 100, "Clip ready.")
+        _set_status(job, "done", 100, "Clip ready." + fallback_note)
     except (ValueError, RuntimeError, FileNotFoundError) as exc:
         clip["size"] = 0
         _set_status(job, "error", job.get("progress", 100),
@@ -484,11 +521,26 @@ class RenderRequest(BaseModel):
     cta_text: str = ""
 
 
+class GenerateClipsRequest(BaseModel):
+    # How many clips to make (1-10) and how long each one is in seconds
+    # (15-60). The backend picks the best moments and returns the clip
+    # windows for the editor — nothing is rendered yet, so the user can
+    # still adjust each clip's start/end before rendering it.
+    count: int = 3
+    clip_seconds: float = 30.0
+
+
 class DownloadRequest(BaseModel):
     url: str
     # How many playlist items to download (0 = all, up to 10). Ignored
     # for a single-video URL. Validated in the handler for a friendly 400.
     limit: int = 0
+    # Max resolution: "best" (up to 1080p), "1080", "720", "480", "360".
+    quality: str = "best"
+    # Optional per-video size cap in MB (None = no cap). If no format
+    # fits the cap at the chosen quality, the download fails with a
+    # clear "no format fits" message instead of a generic error.
+    max_size_mb: float | None = None
 
 
 class LoginRequest(BaseModel):
@@ -636,6 +688,57 @@ def render_job_clip(
     return JSONResponse(status_code=201, content=dict(clip))
 
 
+@app.post("/api/jobs/{job_id}/generate-clips")
+def generate_job_clips(job_id: str, payload: GenerateClipsRequest) -> JSONResponse:
+    """Generate N clips of X seconds from the job's best moments.
+
+    Returns {"clips": [{start, end, score, reasons}], "note": str|None,
+    "count": int, "clip_seconds": float}. Nothing is rendered here —
+    the frontend shows the windows in the editor, where each clip's
+    start/end stays editable before it is rendered.
+    """
+    job = _get_job_or_404(job_id)
+    if job["status"] not in ("ready", "done"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job is {job['status']} — clips can only be generated once the job is ready.",
+        )
+    count = payload.count
+    if count < 1 or count > 10:
+        raise HTTPException(
+            status_code=400, detail="Number of clips must be between 1 and 10."
+        )
+    clip_seconds = float(payload.clip_seconds)
+    if clip_seconds < 15 or clip_seconds > 60:
+        raise HTTPException(
+            status_code=400,
+            detail="Clip length must be between 15 and 60 seconds.",
+        )
+    duration = job.get("duration")
+    if not duration and job.get("transcript"):
+        duration = max(float(seg.get("end", 0)) for seg in job["transcript"])
+    # Recompute the loudness curve for the ranking (it is not persisted
+    # on the job); if it fails, the ranking falls back to transcript
+    # signals only — same as the pipeline does.
+    loudness = None
+    source_path = _job_dir(job_id) / "source.mp4"
+    if source_path.exists():
+        try:
+            loudness = get_loudness_curve(str(source_path))
+        except Exception:
+            loudness = None
+    clips, note = generate_clips(
+        job.get("transcript", []), duration,
+        loudness_curve=loudness, count=count, clip_seconds=clip_seconds,
+    )
+    return JSONResponse(content={
+        "clips": clips,
+        "note": note,
+        "count": len(clips),
+        "clip_seconds": clip_seconds,
+    })
+
+
 @app.get("/api/clips/{clip_id}")
 def get_clip(clip_id: str) -> FileResponse:
     for job in jobs.values():
@@ -687,11 +790,24 @@ def create_download(payload: DownloadRequest) -> JSONResponse:
             status_code=400,
             detail="Quantity must be between 0 (all) and 10.",
         )
+    quality = (payload.quality or "best").strip().lower()
+    if quality not in QUALITY_HEIGHTS:
+        raise HTTPException(
+            status_code=400,
+            detail="Quality must be one of: Best, 1080p, 720p, 480p, 360p.",
+        )
+    max_size_mb = payload.max_size_mb
+    if max_size_mb is not None and max_size_mb <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Max size must be more than 0 MB, or leave it blank for no cap.",
+        )
     download_id = uuid.uuid4().hex[:16]
     work_dir = DOWNLOADS_DIR / download_id
     try:
         files, title = download_files(
-            url, str(work_dir), limit, MAX_FILE_MB, MAX_DURATION
+            url, str(work_dir), limit, MAX_FILE_MB, MAX_DURATION,
+            quality=quality, max_size_mb=max_size_mb,
         )
     except ValueError as exc:
         shutil.rmtree(work_dir, ignore_errors=True)

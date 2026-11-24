@@ -60,8 +60,12 @@ Then open <http://localhost:8000> — the web UI is served from `web/` by the sa
 
 1. Paste a YouTube or Facebook video URL and submit — a job is created (`queued → downloading → transcribing → ready`).
 2. When the job is `ready`, the transcript and up to 8 suggested highlights appear.
-3. Pick a highlight (or set a custom start/end, max 60 s), type a hook line and a CTA, and render.
+3. Pick a highlight (or set a custom start/end, max 60 s), type a hook line and a CTA, and render. Or use **Generate clips**: set **Number of clips** (1–10) and **Clip length (seconds)** (15–60) and the tool makes exactly that many clips of that length from the best moments — each one stays editable (start/end) in the editor before you render it. If the video is too short to fit that many clips, it makes as many as fit and says so.
 4. When rendering finishes (`done`), the clip appears in the job's clip list — download it from `GET /api/clips/{clip_id}`.
+
+Clipping never downloads the full video: only the audio (for the transcript and highlights) and, per clip, just that clip's section — so jobs start fast and use little disk. (The Video downloader tab is different: it downloads the complete video, on purpose.) If a platform does not support section downloads, a clip falls back to the full video for that render and the job says so.
+
+The clip editor stays disabled until the video's real duration has loaded, so it never shows a fake `0:00` clip length. If a video cannot be fetched (e.g. it is geo-blocked for the server's country), the job shows a plain-language error instead of the raw downloader message.
 
 ### Video Downloader
 
@@ -69,7 +73,8 @@ The **Video downloader** tab is the website version of the Termux **Manan Downlo
 
 1. Open the **Video downloader** tab, paste a **TikTok, Facebook or YouTube** video link.
 2. Set **how many videos** (0 = all, for playlists — max 10). For a single video the number does not matter.
-3. Press **Download**. The server fetches the video at best quality (up to 1080p) and the file downloads in your browser.
+3. Pick a **Quality / Resolution** (Best up to 1080p, 1080p, 720p, 480p or 360p) and optionally a **Max size (MB)** — blank means no cap. If no format fits the size cap at that quality, the download fails with a clear message instead of a generic error.
+4. Press **Download**. The server fetches the complete video at the chosen quality and the file downloads in your browser.
 
 What you get back: one MP4 file (named after the video title). A playlist comes back as a single zip file with up to 10 videos. The download link is one-time and expires after 10 minutes — save the file right away; the server deletes it after it is served once (or when it expires).
 
@@ -99,9 +104,10 @@ Auth is token-based: log in once, then send the token as `Authorization: Bearer 
 | `GET` | `/api/jobs` | List of job summaries (token required) |
 | `GET` | `/api/jobs/{job_id}` | Full job incl. `transcript`, `highlights`, `clips` (token required) |
 | `POST` | `/api/jobs/{job_id}/render` `{"start","end","hook_text","cta_text"}` | Render a clip → `201` clip object (windows over 60 s are clamped to 60 s) (token required) |
+| `POST` | `/api/jobs/{job_id}/generate-clips` `{"count":3,"clip_seconds":30}` | Generate `count` (1–10) non-overlapping clips of `clip_seconds` (15–60 s) from the best moments → `{"clips":[{"start","end","score","reasons"}],"note","count","clip_seconds"}`; nothing is rendered — each clip stays editable in the editor before rendering (token required) |
 | `GET` | `/api/clips/{clip_id}` | Download the rendered MP4 (public — clip IDs are unguessable UUIDs, and `<video>` previews / download links cannot send an auth header cross-origin; the jobs API stays token-gated so clips cannot be listed or discovered without the password) |
 | `DELETE` | `/api/clips/{clip_id}` | Delete a clip → `{"deleted": true}` (token required) |
-| `POST` | `/api/download` `{"url": "...", "limit": 0}` | Download a video (token required) → `201 {"id","download_url","filename","size","content_type","platform","items","expires_in"}`; `limit` is the playlist quantity (0 = all, max 10); a playlist comes back as a zip. `400` for invalid URLs/quantity, `502` when the platform blocks the download |
+| `POST` | `/api/download` `{"url": "...", "limit": 0, "quality": "best", "max_size_mb": null}` | Download a video (token required) → `201 {"id","download_url","filename","size","content_type","platform","items","expires_in"}`; `limit` is the playlist quantity (0 = all, max 10); a playlist comes back as a zip. `quality` is `best`/`1080`/`720`/`480`/`360`; `max_size_mb` caps each format's size (blank = no cap) — if no format fits the cap at that quality the error says so. `400` for invalid URLs/quantity/quality/size, `502` when the platform blocks the download |
 | `GET` | `/api/downloads/{download_id}` | Download the file from `POST /api/download` (public — one-time, unguessable UUID, expires after 10 minutes; the file is deleted after it is served) |
 
 Unauthenticated calls to a token-gated endpoint return `401 {"detail": "Authentication required."}`. Static files (`/`, `/app.js`, `/style.css`, `/assets/logo.jpg`, `/login`) are public; the app shell is useless without the API.

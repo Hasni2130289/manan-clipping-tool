@@ -134,20 +134,41 @@
           <div class="field">
             <label for="start-number">Start (seconds)</label>
             <div class="range-row">
-              <input type="range" id="start-range" min="0" max="0" step="0.1" value="0" aria-label="Start time slider">
-              <input type="number" id="start-number" min="0" max="0" step="0.1" value="0">
+              <input type="range" id="start-range" min="0" max="0" step="0.1" value="0" aria-label="Start time slider" disabled>
+              <input type="number" id="start-number" min="0" max="0" step="0.1" value="0" disabled>
             </div>
           </div>
           <div class="field">
             <label for="end-number">End (seconds)</label>
             <div class="range-row">
-              <input type="range" id="end-range" min="0" max="0" step="0.1" value="0" aria-label="End time slider">
-              <input type="number" id="end-number" min="0" max="0" step="0.1" value="0">
+              <input type="range" id="end-range" min="0" max="0" step="0.1" value="0" aria-label="End time slider" disabled>
+              <input type="number" id="end-number" min="0" max="0" step="0.1" value="0" disabled>
             </div>
           </div>
         </div>
 
-        <p id="clip-length" class="clip-length">Clip length: 0:00</p>
+        <p id="clip-length" class="clip-length">Clip length: &mdash;</p>
+        <p id="editor-video-duration" class="hint">Video length: &mdash;</p>
+
+        <!-- Generate N clips of X seconds from the best moments. The
+             generated clips appear below with editable start/end times;
+             render each one when you are happy with its window. -->
+        <div class="editor-grid generate-grid">
+          <div class="field">
+            <label for="clip-count">Number of clips</label>
+            <input type="number" id="clip-count" min="1" max="10" step="1" value="3">
+          </div>
+          <div class="field">
+            <label for="clip-seconds">Clip length (seconds)</label>
+            <input type="number" id="clip-seconds" min="15" max="60" step="1" value="30">
+          </div>
+        </div>
+        <div class="editor-actions">
+          <button type="button" class="btn btn-secondary" id="generate-btn" disabled>Generate clips</button>
+          <span id="generate-status" class="notice" aria-live="polite"></span>
+        </div>
+        <p id="generate-error" class="error" role="alert" aria-live="polite"></p>
+        <div id="generated-list" class="generated-list"></div>
 
         <div class="field">
           <label for="hook-text">Hook text (top of video, optional)</label>
@@ -197,6 +218,20 @@
         <div class="field download-qty">
           <label for="download-limit">How many videos? (0 = all, for playlists &mdash; max 10)</label>
           <input type="number" id="download-limit" min="0" max="10" step="1" value="0">
+        </div>
+        <div class="field">
+          <label for="download-quality">Quality / Resolution</label>
+          <select id="download-quality">
+            <option value="best" selected>Best (up to 1080p)</option>
+            <option value="1080">1080p</option>
+            <option value="720">720p</option>
+            <option value="480">480p</option>
+            <option value="360">360p</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="download-max-size">Max size (MB) &mdash; optional, blank = no cap</label>
+          <input type="number" id="download-max-size" min="1" step="1" placeholder="e.g. 50">
         </div>
         <p id="download-error" class="error" role="alert" aria-live="polite"></p>
         <p id="download-status" class="notice" aria-live="polite"></p>

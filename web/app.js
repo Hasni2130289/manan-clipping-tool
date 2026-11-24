@@ -83,6 +83,13 @@ const API_BASE_URL = "";
   var renderBtn = document.getElementById('render-btn');
   var renderStatus = document.getElementById('render-status');
   var renderError = document.getElementById('render-error');
+  var editorVideoDuration = document.getElementById('editor-video-duration');
+  var clipCountInput = document.getElementById('clip-count');
+  var clipSecondsInput = document.getElementById('clip-seconds');
+  var generateBtn = document.getElementById('generate-btn');
+  var generateStatus = document.getElementById('generate-status');
+  var generateError = document.getElementById('generate-error');
+  var generatedList = document.getElementById('generated-list');
 
   var clipsPanel = document.getElementById('clips-panel');
   var clipsList = document.getElementById('clips-list');
@@ -97,6 +104,8 @@ const API_BASE_URL = "";
   var downloadUrlInput = document.getElementById('download-url');
   var downloadBtn = document.getElementById('download-btn');
   var downloadLimitInput = document.getElementById('download-limit');
+  var downloadQualityInput = document.getElementById('download-quality');
+  var downloadMaxSizeInput = document.getElementById('download-max-size');
   var downloadPlatform = document.getElementById('download-platform');
   var downloadError = document.getElementById('download-error');
   var downloadStatus = document.getElementById('download-status');
@@ -580,6 +589,9 @@ const API_BASE_URL = "";
     setText(fetchError, '');
     setText(renderError, '');
     setText(renderStatus, '');
+    setText(generateError, '');
+    setText(generateStatus, '');
+    generatedList.textContent = '';
     progressFill.style.width = '0%';
     progressBar.setAttribute('aria-valuenow', '0');
     progressBar.removeAttribute('data-status');
@@ -629,6 +641,14 @@ const API_BASE_URL = "";
 
     videoDuration = Number(job.duration) || 0;
     setText(jobDuration, videoDuration ? formatTime(videoDuration) : '');
+    setText(editorVideoDuration, videoDuration ? 'Video length: ' + formatTime(videoDuration) : 'Video length: —');
+
+    // The editor sliders stay disabled until the real video duration is
+    // known, so they never sit at 0:00 as if that were a real window.
+    var editorUsable = videoDuration > 0;
+    [startRange, startNumber, endRange, endNumber].forEach(function (el) {
+      el.disabled = !editorUsable;
+    });
 
     var progress = clampNumber(job.progress, 0, 100);
     progressFill.style.width = progress + '%';
@@ -657,11 +677,20 @@ const API_BASE_URL = "";
         setEditorWindow(0, Math.min(MAX_CLIP_SECONDS, videoDuration));
       }
     } else if (status === 'error') {
-      show(editorPanel);
+      // The editor stays hidden on a failed job: with no video duration
+      // its sliders would sit at 0:00 and look like a real clip window.
+      // The friendly error is shown in the job panel's progress message.
+      hide(editorPanel);
       show(clipsPanel);
       renderClips(job.clips || []);
     }
-    renderBtn.disabled = !isReady;
+    renderBtn.disabled = !isReady || !editorUsable;
+    generateBtn.disabled = !isReady || !editorUsable;
+    // Generated clips render one at a time: their buttons follow the
+    // same rule as the main Render button.
+    Array.prototype.forEach.call(
+      generatedList.querySelectorAll('button'),
+      function (btn) { btn.disabled = !isReady || !editorUsable; });
     updateClipLength();
   }
 
@@ -778,6 +807,14 @@ const API_BASE_URL = "";
   }
 
   function updateClipLength() {
+    // Until the real video duration is known, show a dash — never 0:00
+    // as if it were a real clip length.
+    if (!videoDuration) {
+      clipLengthEl.textContent = '';
+      clipLengthEl.classList.remove('over');
+      clipLengthEl.appendChild(document.createTextNode('Clip length: —'));
+      return;
+    }
     var window = getEditorWindow();
     var length = Math.max(0, window.end - window.start);
     clipLengthEl.textContent = '';
@@ -826,26 +863,20 @@ const API_BASE_URL = "";
 
   // ---------- Render ----------
 
-  renderBtn.addEventListener('click', async function () {
-    if (!currentJobId || !currentJob) { return; }
-    setText(renderError, '');
-    setText(renderStatus, 'Rendering…');
-
-    var window = getEditorWindow();
-    var start = window.start;
-    var end = window.end;
-
+  // Render one clip window. Used by the single-clip Render button and by
+  // each generated clip's own Render button. Returns true on success.
+  async function requestRender(start, end) {
+    if (!currentJobId || !currentJob) { return false; }
     if (end <= start) {
       setText(renderError, 'End must be after start.');
-      setText(renderStatus, '');
-      return;
+      return false;
     }
     // Clamp on render: never send a window longer than 60 s.
     if (end - start > MAX_CLIP_SECONDS) {
       end = start + MAX_CLIP_SECONDS;
-      setEditorWindow(start, end);
     }
-
+    setText(renderError, '');
+    setText(renderStatus, 'Rendering…');
     renderBtn.disabled = true;
     try {
       await fetchJson('/api/jobs/' + encodeURIComponent(currentJobId) + '/render', {
@@ -862,12 +893,137 @@ const API_BASE_URL = "";
       setText(renderStatus, 'Rendering… the clip will appear below when it is done.');
       startPolling();
       await refreshCurrentJob();
+      return true;
     } catch (err) {
       setText(renderError, err.message);
       setText(renderStatus, '');
-      renderBtn.disabled = RENDERABLE_STATUSES.indexOf(currentJob.status) === -1;
+      renderBtn.disabled = RENDERABLE_STATUSES.indexOf(currentJob.status) === -1 || !videoDuration;
+      return false;
+    }
+  }
+
+  renderBtn.addEventListener('click', async function () {
+    var window = getEditorWindow();
+    if (window.end - window.start > MAX_CLIP_SECONDS) {
+      setEditorWindow(window.start, window.start + MAX_CLIP_SECONDS);
+      window = getEditorWindow();
+    }
+    await requestRender(window.start, window.end);
+  });
+
+  // ---------- Generate N clips of X seconds ----------
+
+  generateBtn.addEventListener('click', async function () {
+    if (!currentJobId || !currentJob) { return; }
+    var count = clampNumber(parseInt(clipCountInput.value, 10) || 3, 1, 10);
+    var seconds = clampNumber(parseInt(clipSecondsInput.value, 10) || 30, 15, 60);
+    clipCountInput.value = String(count);
+    clipSecondsInput.value = String(seconds);
+    setText(generateError, '');
+    setText(generateStatus, 'Finding the best moments…');
+    generateBtn.disabled = true;
+    try {
+      var data = await fetchJson('/api/jobs/' + encodeURIComponent(currentJobId) + '/generate-clips', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ count: count, clip_seconds: seconds })
+      });
+      renderGeneratedClips(data.clips || [], data.note || '');
+      if ((data.clips || []).length) {
+        setText(generateStatus, 'Generated ' + data.clips.length + ' clip(s) — adjust the times if you like, then render each one.');
+      } else {
+        setText(generateStatus, 'No clips could be generated for this video.');
+      }
+    } catch (err) {
+      setText(generateError, err.message);
+      setText(generateStatus, '');
+    } finally {
+      generateBtn.disabled = false;
     }
   });
+
+  // One row per generated clip: time range, score/reasons, editable
+  // start/end fields and its own Render button (hook/CTA come from the
+  // editor fields above, same as a manual render).
+  function renderGeneratedClips(clips, note) {
+    generatedList.textContent = '';
+    if (note) {
+      var noteP = document.createElement('p');
+      noteP.className = 'notice';
+      setText(noteP, note);
+      generatedList.appendChild(noteP);
+    }
+    if (!clips || clips.length === 0) { return; }
+    clips.forEach(function (clip, index) {
+      var row = document.createElement('div');
+      row.className = 'generated-clip';
+
+      var head = document.createElement('div');
+      head.className = 'generated-head';
+      var title = document.createElement('strong');
+      setText(title, 'Clip ' + (index + 1) + ' · ' + formatTimeRange(clip.start, clip.end));
+      head.appendChild(title);
+      var score = document.createElement('span');
+      score.className = 'generated-score';
+      setText(score, 'Score ' + Math.round(Number(clip.score) || 0));
+      head.appendChild(score);
+      row.appendChild(head);
+
+      if (Array.isArray(clip.reasons) && clip.reasons.length > 0) {
+        var reasons = document.createElement('p');
+        reasons.className = 'generated-reasons muted small';
+        setText(reasons, clip.reasons.join(' · '));
+        row.appendChild(reasons);
+      }
+
+      var controls = document.createElement('div');
+      controls.className = 'generated-controls';
+
+      var startLabel = document.createElement('label');
+      setText(startLabel, 'Start (s)');
+      var startInput = document.createElement('input');
+      startInput.type = 'number';
+      startInput.min = '0';
+      startInput.max = String(videoDuration || 0);
+      startInput.step = '0.1';
+      startInput.value = String(Number(clip.start) || 0);
+      startLabel.appendChild(startInput);
+
+      var endLabel = document.createElement('label');
+      setText(endLabel, 'End (s)');
+      var endInput = document.createElement('input');
+      endInput.type = 'number';
+      endInput.min = '0';
+      endInput.max = String(videoDuration || 0);
+      endInput.step = '0.1';
+      endInput.value = String(Number(clip.end) || 0);
+      endLabel.appendChild(endInput);
+
+      var renderOneBtn = document.createElement('button');
+      renderOneBtn.type = 'button';
+      renderOneBtn.className = 'btn btn-small';
+      setText(renderOneBtn, 'Render');
+      renderOneBtn.addEventListener('click', async function () {
+        var start = clampNumber(startInput.value, 0, videoDuration || 0);
+        var end = clampNumber(endInput.value, 0, videoDuration || 0);
+        if (end <= start) {
+          setText(renderError, 'End must be after start.');
+          return;
+        }
+        renderOneBtn.disabled = true;
+        setText(renderOneBtn, 'Rendering…');
+        await requestRender(start, end);
+        renderOneBtn.disabled = false;
+        setText(renderOneBtn, 'Render');
+      });
+
+      controls.appendChild(startLabel);
+      controls.appendChild(endLabel);
+      controls.appendChild(renderOneBtn);
+      row.appendChild(controls);
+      generatedList.appendChild(row);
+    });
+  }
 
   // ---------- Clips list ----------
 
@@ -1022,6 +1178,13 @@ const API_BASE_URL = "";
       limit = MAX_DOWNLOAD_ITEMS;
       downloadLimitInput.value = String(MAX_DOWNLOAD_ITEMS);
     }
+    var quality = (downloadQualityInput.value || 'best').toLowerCase();
+    var maxSizeRaw = downloadMaxSizeInput.value.trim();
+    var maxSize = maxSizeRaw === '' ? null : Number(maxSizeRaw);
+    if (maxSize !== null && (!isFinite(maxSize) || maxSize <= 0)) {
+      setText(downloadError, 'Max size must be more than 0 MB, or leave it blank for no cap.');
+      return;
+    }
     setText(downloadError, '');
     setText(downloadStatus, 'Downloading… this can take a while for a long video.');
     hide(downloadResult);
@@ -1031,7 +1194,7 @@ const API_BASE_URL = "";
       var data = await fetchJson('/api/download', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: url, limit: limit })
+        body: JSON.stringify({ url: url, limit: limit, quality: quality, max_size_mb: maxSize })
       });
       setText(downloadStatus, '');
       setText(downloadFilename, data.filename || 'video.mp4');

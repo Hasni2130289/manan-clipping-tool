@@ -53,6 +53,40 @@ FORMAT_SELECTOR = (
     "/best[height<=1080]/best"
 )
 
+# Downloader quality choices (dropdown value -> max video height).
+# "best" is the same as the default FORMAT_SELECTOR above: best quality
+# up to 1080p.
+QUALITY_HEIGHTS = {"best": 1080, "1080": 1080, "720": 720, "480": 480, "360": 360}
+
+
+def format_selector(quality: str = "best", max_size_mb: float | None = None) -> str:
+    """Build a yt-dlp format selector for a quality + optional size cap.
+
+    `quality` is one of "best" / "1080" / "720" / "480" / "360" (max
+    video height). `max_size_mb` caps each format's filesize
+    (`[filesize<50M]`); if no format fits the cap, yt-dlp fails with
+    "Requested format is not available" and the caller turns that into
+    a clear "no format fits" message. Unknown quality values fall back
+    to "best".
+
+    The bare `/best` last resort is kept ONLY for an unconstrained
+    "best" request (the historical behaviour — e.g. a 4K-only video
+    still downloads). Whenever a quality or size cap is requested the
+    cap must be real, so no uncapped fallback is appended: a cap that
+    nothing satisfies must fail loudly instead of silently returning
+    a file that ignores the cap.
+    """
+    height = QUALITY_HEIGHTS.get((quality or "best").strip().lower(), 1080)
+    size_pred = f"[filesize<{max_size_mb:g}M]" if max_size_mb else ""
+    selector = (
+        f"bestvideo[height<={height}]{size_pred}[ext=mp4]+bestaudio{size_pred}[ext=m4a]"
+        f"/bestvideo[height<={height}]{size_pred}+bestaudio{size_pred}"
+        f"/best[height<={height}]{size_pred}"
+    )
+    if (quality or "best").strip().lower() == "best" and not max_size_mb:
+        selector += "/best"
+    return selector
+
 
 def validate_url(url: str) -> str:
     """Validate a source URL. Returns the stripped URL.
@@ -83,6 +117,14 @@ def _friendly_error(stderr: str, url: str) -> str:
     text = (stderr or "").lower()
     if "bot" in text or "sign in to confirm you’re not a bot" in text or "confirm you are not a bot" in text:
         return "YouTube blocked this request (bot check). Try a different video or try again later."
+    if ("available in your country" in text or "blocked in your country" in text
+            or "geo-block" in text or "geo-restricted" in text
+            or "geo restricted" in text):
+        # e.g. "[youtube] <id>: The uploader has not made this video
+        # available in your country" — the video is geo-blocked for the
+        # country the server runs in. Must come before the generic
+        # "not available" check below, which would hide the real cause.
+        return "This video isn't available in the server's country — try a different link."
     if "tiktok" in url.lower() and ("unsupported url" in text or "unable to" in text):
         return "TikTok blocked this download — TikTok restricts most downloads. Try a YouTube or Facebook link instead."
     if "private" in text:
@@ -204,6 +246,8 @@ def download_files(
     limit: int = 0,
     max_file_mb: int = 2048,
     max_duration: float | None = None,
+    quality: str = "best",
+    max_size_mb: float | None = None,
 ) -> tuple[list[str], str | None]:
     """Download a video (or a playlist's first items) into out_dir.
 
@@ -211,6 +255,13 @@ def download_files(
     here, where the Termux tool used unbounded 'best'), file named after
     the video title, playlist capped by `limit` (0 = all, up to
     MAX_PLAYLIST_ITEMS). Returns (file paths, title or None).
+
+    `quality` picks the max resolution ("best" / "1080" / "720" / "480"
+    / "360"); `max_size_mb` caps each format's filesize in the format
+    selector — if no format fits the cap at that quality, a clear
+    "no format fits" error is raised instead of a generic download
+    failure. The download is always the COMPLETE video for a single
+    link (a playlist's items are each complete videos).
 
     YouTube is fetched with the android player client: YouTube's bot
     check blocks yt-dlp's default (web) client from datacenter IPs
@@ -224,12 +275,13 @@ def download_files(
     url = validate_download_url(url)
     os.makedirs(out_dir, exist_ok=True)
     player_client = "android"
+    fmt = format_selector(quality, max_size_mb)
 
     if _is_playlist_url(url):
         cap = limit if 0 < limit <= MAX_PLAYLIST_ITEMS else MAX_PLAYLIST_ITEMS
         title: str | None = None
         args = [
-            "-f", FORMAT_SELECTOR,
+            "-f", fmt,
             "--merge-output-format", "mp4",
             "--playlist-end", str(cap),
             "--no-warnings",
@@ -254,7 +306,7 @@ def download_files(
         else:
             title = None
         args = [
-            "-f", FORMAT_SELECTOR,
+            "-f", fmt,
             "--merge-output-format", "mp4",
             "--no-playlist",
             "--no-warnings",
@@ -264,6 +316,22 @@ def download_files(
 
     result = _run_yt_dlp(args, timeout=1800, player_client=player_client)
     if result.returncode != 0:
+        err_text = (result.stderr or "").lower()
+        if ("requested format is not available" in err_text
+                or "no video formats" in err_text):
+            if quality != "best" or max_size_mb:
+                # The failure IS the cap: no format satisfies the
+                # requested quality / size. Say so plainly instead of
+                # the generic "no format" message.
+                parts = []
+                if quality != "best":
+                    parts.append(f"{quality}p quality")
+                if max_size_mb:
+                    parts.append(f"{max_size_mb:g} MB size cap")
+                raise RuntimeError(
+                    "No format fits " + " and ".join(parts) +
+                    " — try Best (up to 1080p) or a higher size limit."
+                )
         raise RuntimeError(_friendly_error(result.stderr, url))
 
     files = sorted(
@@ -324,6 +392,82 @@ def fetch_metadata(url: str, timeout: int = 60, player_client: str | None = None
         "thumbnail": data.get("thumbnail"),
         "uploader": data.get("uploader"),
     }
+
+
+def download_audio(url: str, out_path: str, player_client: str | None = None) -> str:
+    """Download audio-only for a clipping job (small, fast).
+
+    Used by the clipping pipeline: the Whisper transcript and the
+    loudness curve only need audio, so the full video is never
+    downloaded for a clipping job. The audio is extracted to m4a
+    (transcoded by ffmpeg when the source audio is another codec).
+    Returns out_path. Raises RuntimeError with a human-readable
+    message on any yt-dlp failure.
+    """
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    result = _run_yt_dlp(
+        [
+            "-f", "bestaudio/best",
+            "--extract-audio", "--audio-format", "m4a",
+            "--no-playlist",
+            "--no-warnings",
+            "-o", out_path,
+            url,
+        ],
+        timeout=1800,
+        player_client=player_client,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(_friendly_error(result.stderr, url))
+    if not os.path.exists(out_path):
+        candidates = [out_path + ".m4a"]
+        found = next((c for c in candidates if os.path.exists(c)), None)
+        if found is None:
+            raise RuntimeError("Audio download finished but no audio file was found.")
+        out_path = found
+    return out_path
+
+
+def download_section(
+    url: str, start: float, end: float, out_path: str,
+    player_client: str | None = None,
+) -> str:
+    """Download ONLY the video section [start, end] for one clip.
+
+    Uses yt-dlp `--download-sections`, which fetches just the requested
+    range (verified: a 20 s section of a 55 s video downloads in ~6 s
+    at ~1.5 MB instead of ~49 s / ~3.8 MB for the full video), and the
+    section file starts exactly at `start` (frame-verified), so the
+    caller renders it from offset 0. The video is never downloaded in
+    full for a clipping job. Raises RuntimeError with a human-readable
+    message on any yt-dlp failure (including when the platform does not
+    support section downloads — the caller falls back to a full
+    download in that case).
+    """
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    section = f"*{float(start):.1f}-{float(end):.1f}"
+    result = _run_yt_dlp(
+        [
+            "-f", FORMAT_SELECTOR,
+            "--merge-output-format", "mp4",
+            "--download-sections", section,
+            "--no-playlist",
+            "--no-warnings",
+            "-o", out_path,
+            url,
+        ],
+        timeout=1800,
+        player_client=player_client,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(_friendly_error(result.stderr, url))
+    if not os.path.exists(out_path):
+        candidates = [out_path + ".mp4"]
+        found = next((c for c in candidates if os.path.exists(c)), None)
+        if found is None:
+            raise RuntimeError("Section download finished but no video file was found.")
+        out_path = found
+    return out_path
 
 
 def download_video(url: str, out_path: str, max_file_mb: int, max_duration: float | None = None) -> str:

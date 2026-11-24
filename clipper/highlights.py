@@ -1,12 +1,16 @@
-"""Highlight suggestions: 45-second windows scored 0-100.
+"""Highlight suggestions: scored windows over the video.
 
 Signals (weights, renormalised when a signal is missing):
 - loudness peaks 0.5  (per-second RMS from ffmpeg astats)
 - excitement keywords 0.3 (English keyword hits in the transcript)
 - speech density 0.2 (words per second)
 
-Windows are 45 s long with a 5 s step. If the video is shorter than
-30 s, the single candidate is the whole video.
+Windows are `window_seconds` long (default 45 s) with a 5 s step. If the
+video is shorter than the window, the single candidate is the whole video.
+
+`generate_clips()` builds exactly N non-overlapping clips of a chosen
+length from the same ranking: it takes the best moments first, then fills
+any remainder from the most speech-dense parts of the transcript.
 """
 
 from __future__ import annotations
@@ -156,11 +160,14 @@ def suggest_highlights(
     transcript: list[dict],
     duration: float | None,
     loudness_curve: list[float] | None = None,
+    window_seconds: float = WINDOW_SECONDS,
+    max_highlights: int = MAX_HIGHLIGHTS,
 ) -> list[dict]:
-    """Return up to 8 highlight windows, best score first.
+    """Return up to `max_highlights` highlight windows, best score first.
 
     Each item: {"start": float, "end": float, "score": int,
-                "reasons": [str, ...]}.
+                "reasons": [str, ...]}. Windows are `window_seconds` long
+    (default 45 s); a shorter video yields the single whole-video window.
     """
     if not duration or duration <= 0:
         if transcript:
@@ -168,21 +175,22 @@ def suggest_highlights(
         if not duration or duration <= 0:
             return []
     duration = float(duration)
+    window_seconds = float(window_seconds)
 
-    if duration < 30:
+    if duration < window_seconds:
         windows = [(0.0, duration)]
     else:
         windows: list[tuple[float, float]] = []
         start = 0.0
-        while start + WINDOW_SECONDS <= duration:
-            windows.append((start, start + WINDOW_SECONDS))
+        while start + window_seconds <= duration:
+            windows.append((start, start + window_seconds))
             start += STEP_SECONDS
         if not windows:
             windows = [(0.0, duration)]
         elif windows[-1][1] < duration:
             # Cover a trailing partial stretch with a final window ending
             # at the video end, unless it duplicates the last window.
-            tail = (max(0.0, duration - WINDOW_SECONDS), duration)
+            tail = (max(0.0, duration - window_seconds), duration)
             if tail[0] - windows[-1][0] >= STEP_SECONDS:
                 windows.append(tail)
 
@@ -222,7 +230,7 @@ def suggest_highlights(
         return [
             {"start": round(s, 1), "end": round(e, 1), "score": 50,
              "reasons": ["Opening section of the video"]}
-            for s, e in windows[:MAX_HIGHLIGHTS]
+            for s, e in windows[:max_highlights]
         ]
     for key in weights:
         weights[key] /= total_weight
@@ -258,4 +266,124 @@ def suggest_highlights(
             "reasons": reasons,
         })
     candidates.sort(key=lambda c: c["score"], reverse=True)
-    return candidates[:MAX_HIGHLIGHTS]
+    return candidates[:max_highlights]
+
+
+def _overlaps(start: float, end: float, picked: list[dict]) -> bool:
+    """True if [start, end) overlaps any window already picked."""
+    return any(not (end <= p["start"] + 0.01 or start >= p["end"] - 0.01)
+               for p in picked)
+
+
+def _fill_from_density(
+    transcript: list[dict],
+    duration: float,
+    clip_seconds: float,
+    picked: list[dict],
+    count: int,
+) -> list[dict]:
+    """Fill remaining slots with the most speech-dense windows.
+
+    Slides a `clip_seconds` window across the video in half-length
+    steps, scores each by words spoken inside it, and takes the best
+    ones that do not overlap `picked`. With no transcript every window
+    scores 0, so the earliest fitting windows are taken instead.
+    """
+    step = max(1.0, clip_seconds / 2)
+    starts: list[float] = []
+    t = 0.0
+    while t + clip_seconds <= duration + 1e-9:
+        starts.append(t)
+        t += step
+    if not starts and duration > 0:
+        starts = [0.0]
+    scored: list[tuple[int, float, float]] = []
+    for s in starts:
+        e = min(s + clip_seconds, duration)
+        segs = _segments_in_window(transcript, s, e)
+        words = sum(len(seg.get("text", "").split()) for seg in segs)
+        scored.append((words, s, e))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    for _words, s, e in scored:
+        if len(picked) >= count:
+            break
+        if _overlaps(s, e, picked):
+            continue
+        picked.append({
+            "start": round(float(s), 1),
+            "end": round(float(e), 1),
+            "score": 50,
+            "reasons": ["Speech-dense section"] if transcript else ["Section of the video"],
+        })
+    picked.sort(key=lambda c: c["start"])
+    return picked
+
+
+def generate_clips(
+    transcript: list[dict],
+    duration: float | None,
+    loudness_curve: list[float] | None = None,
+    count: int = 3,
+    clip_seconds: float = 30.0,
+) -> tuple[list[dict], str | None]:
+    """Generate up to `count` non-overlapping clips of `clip_seconds` each.
+
+    Takes the best moments first (the same loudness / keyword / density
+    ranking as `suggest_highlights`, with windows of exactly
+    `clip_seconds`), then fills any remainder from the most speech-dense
+    parts of the transcript. Every returned clip is exactly
+    `clip_seconds` long — except when the whole video is shorter than
+    `clip_seconds`, in which case the single clip is the whole video.
+
+    Returns (clips, note): clips are {"start", "end", "score",
+    "reasons"} dicts in timeline order; note is None when exactly
+    `count` clips were produced, otherwise a short explanation (e.g.
+    the video is too short to fit that many clips of that length).
+    """
+    if not duration or duration <= 0:
+        if transcript:
+            duration = max(float(seg.get("end", 0)) for seg in transcript)
+        if not duration or duration <= 0:
+            return [], "Could not determine the video length."
+    duration = float(duration)
+    clip_seconds = float(clip_seconds)
+    count = max(1, int(count))
+
+    if clip_seconds > duration:
+        # The whole video is shorter than one requested clip.
+        return (
+            [{"start": 0.0, "end": round(duration, 1), "score": 50,
+              "reasons": ["Whole video"]}],
+            f"Video is shorter than {clip_seconds:g} s, so this is the whole video as one clip.",
+        )
+
+    # Best moments first: rank windows of exactly clip_seconds and take
+    # the top ones that do not overlap each other.
+    candidates = suggest_highlights(
+        transcript, duration, loudness_curve,
+        window_seconds=clip_seconds, max_highlights=500,
+    )
+    picked: list[dict] = []
+    for cand in candidates:
+        s, e = float(cand["start"]), float(cand["end"])
+        if e - s < clip_seconds - 0.5:
+            # Short tail / whole-video window — not a full-length clip.
+            continue
+        if _overlaps(s, e, picked):
+            continue
+        picked.append(cand)
+        if len(picked) >= count:
+            break
+
+    if len(picked) < count:
+        picked = _fill_from_density(transcript, duration, clip_seconds, picked, count)
+
+    picked.sort(key=lambda c: c["start"])
+    if len(picked) == count:
+        return picked, None
+    if picked:
+        return picked, (
+            f"Only {len(picked)} non-overlapping clip(s) of {clip_seconds:g} s "
+            f"fit in this video (it is {duration:.0f} s long)."
+        )
+    return picked, f"No {clip_seconds:g} s clip fits in this video."
