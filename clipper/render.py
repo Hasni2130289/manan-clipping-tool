@@ -1,9 +1,15 @@
 """Render a vertical 9:16 clip with ffmpeg + ASS captions.
 
-Output: 1080x1920, 30 fps, libx264 CRF 19, AAC 128k, loudnorm audio,
+Output: 1080x1920, 30 fps, libx264 CRF 18, AAC 128k, loudnorm audio,
 hook text at the top, CTA at the bottom, and (when available) transcript
 captions above the CTA. Clip length is clamped to 60 seconds and the
 result is validated with ffprobe before it is returned.
+
+Layout is the middle-band style: the source video is scaled DOWN to at
+most 1080 px wide with lanczos and NEVER upscaled, then centred on a
+deep-purple (#390039) 1080x1920 background, so a 16:9 source plays in a
+sharp middle band with the hook on top and the CTA at the bottom. A
+source that is already vertical 1080x1920 fills the frame as before.
 """
 
 from __future__ import annotations
@@ -16,6 +22,9 @@ import tempfile
 MAX_CLIP_SECONDS = 60.0
 TARGET_WIDTH = 1080
 TARGET_HEIGHT = 1920
+# Deep-purple background for the middle-band layout (same colour as the
+# approved v4 Shorts background).
+BAND_BG_COLOR = "0x390039"
 
 
 def _ass_time(seconds: float) -> str:
@@ -245,11 +254,18 @@ def render_clip(
     try:
         with open(ass_path, "w", encoding="utf-8") as handle:
             handle.write(ass_content)
-        # The ASS path lives under /tmp and contains no ':' or quotes, so
-        # it is safe to embed directly in the filter graph.
+        # Middle-band layout (never upscale): scale the video down to at
+        # most 1080 px wide with lanczos (trunc to an even width for
+        # yuv420p; height -2 keeps the aspect ratio), then centre it on
+        # the deep-purple 1080x1920 canvas. A 16:9 1080p source becomes a
+        # 1080x608 band at y 656-1264, leaving the hook (top, MarginV
+        # 120) and the captions/CTA (bottom, MarginV 170/40) on the
+        # purple bands with no overlap. A vertical 1080x1920 source
+        # fills the frame exactly as before.
         video_filter = (
-            "scale=1080:1920:force_original_aspect_ratio=increase,"
-            "crop=1080:1920,fps=30,"
+            "scale='trunc(min(1080,iw)/2)*2':-2:flags=lanczos,"
+            f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color={BAND_BG_COLOR},"
+            "fps=30,"
             f"ass={ass_path}"
         )
         cmd = [
@@ -259,12 +275,13 @@ def render_clip(
             "-vf", video_filter,
             "-af", _loudnorm_filter(source_path, start, end),
             "-ac", "2",
-            # superfast (not veryfast): ~26% faster encode at the same
-            # CRF 19 / 1080x1920 quality — measured 12.8 s vs 17.3 s for
-            # a 20 s clip, same -15.07 LUFS. File size roughly doubles
-            # (16 MB vs 9 MB per 20 s), which is the trade for speed;
-            # ultrafast would be faster still but ~3x the size.
-            "-c:v", "libx264", "-crf", "19", "-preset", "superfast",
+            # veryfast + CRF 18: better quality than superfast/CRF 19 on
+            # busy game footage (finer quantisation, more motion search).
+            # Measured 21.9 s for a 20 s clip including the two-pass
+            # loudnorm measurement (the old superfast/CRF 19 build took
+            # 23.4 s for the same window — the middle-band layout
+            # encodes fewer pixels, which pays for the slower preset).
+            "-c:v", "libx264", "-crf", "18", "-preset", "veryfast",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "128k",
             "-movflags", "+faststart",
