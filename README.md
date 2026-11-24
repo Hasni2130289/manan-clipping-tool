@@ -165,7 +165,7 @@ Do **not** commit a `.env` file or any password — secrets go in the platform's
 
 ### 2. Create the service from the Blueprint
 
-1. Render Dashboard → **New → Blueprint** → connect your GitHub repo.
+1. Render Dashboard → **New → Blueprint** → connect your repo (GitHub, GitLab or Bitbucket).
 2. `render.yaml` is picked up automatically: one free web service, Docker runtime, health check on `/api/health`, and the environment variables `WHISPER_MODEL=tiny`, `MAX_DURATION=3600`, `MAX_FILE_MB=512`, `JOB_RETENTION_DAYS=7`.
 3. Set `APP_PASSWORD_HASH` in the dashboard (it is marked `sync: false` in `render.yaml`, so it is never stored in the file): generate it locally with `printf '%s' 'your-password' | sha256sum` and paste **only the hex digest**. Never paste the plain password anywhere else.
 4. Click **Deploy**. Render gives you a URL like `https://manan-clipping-tool.onrender.com` — open it, you should see the login page. **This URL is the single shareable link for the whole tool** (frontend + API on one service) — send it to anyone; they log in with the password and get the full app. (The free service sleeps after inactivity, so the first open can take ~30–60 s to wake.)
