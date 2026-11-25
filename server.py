@@ -63,6 +63,7 @@ from pydantic import BaseModel, Field
 
 from clipper.download import (
     QUALITY_HEIGHTS,
+    YOUTUBE_PLAYER_CLIENTS,
     download_audio,
     download_files,
     download_section,
@@ -77,7 +78,7 @@ from clipper.highlights import generate_clips, get_loudness_curve, suggest_highl
 from clipper.render import MAX_CLIP_SECONDS, render_clip, theme_for_index
 from clipper.transcribe import TranscriptionUnavailable, transcribe
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 BASE_DIR = Path(__file__).resolve().parent
 WEB_DIR = BASE_DIR / "web"
 
@@ -493,7 +494,7 @@ def _run_pipeline(job_id: str) -> None:
     audio_path = job_dir / "audio.m4a"
     try:
         _set_status(job, "downloading", 10, "Fetching video info…")
-        meta = fetch_metadata(job["url"], player_client="android")
+        meta = fetch_metadata(job["url"], player_client=YOUTUBE_PLAYER_CLIENTS)
         job["title"] = meta.get("title")
         job["duration"] = meta.get("duration")
         job["thumbnail"] = meta.get("thumbnail")
@@ -507,7 +508,7 @@ def _run_pipeline(job_id: str) -> None:
         # for the transcript + highlight detection (small and fast), and
         # each clip's video is fetched as just its section at render time.
         _set_status(job, "downloading", 25, "Downloading audio…")
-        download_audio(job["url"], str(audio_path), player_client="android")
+        download_audio(job["url"], str(audio_path), player_client=YOUTUBE_PLAYER_CLIENTS)
         _set_status(job, "transcribing", 60, "Transcribing audio…")
         try:
             transcript = transcribe(str(audio_path), model=WHISPER_MODEL)
@@ -571,7 +572,7 @@ def _run_render(job_id: str, clip_id: str) -> None:
     try:
         if not (section_path.exists() and section_path.stat().st_size > 0):
             download_section(
-                job["url"], start, end, str(section_path), player_client="android"
+                job["url"], start, end, str(section_path), player_client=YOUTUBE_PLAYER_CLIENTS
             )
         render_source = str(section_path)
         render_start, render_end = 0.0, length

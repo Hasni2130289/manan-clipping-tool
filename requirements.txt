@@ -1,6 +1,11 @@
 fastapi>=0.110
 uvicorn[standard]>=0.29
-yt-dlp>=2024.4.7
+# Pinned to a recent release on purpose: YouTube changes its player
+# constantly and old yt-dlp versions stop working against it. Railway
+# caches the pip-install layer, so the pin must move for a rebuild to
+# pick up the new version — bump this whenever a YouTube download
+# breaks on the live tool.
+yt-dlp>=2026.11.23
 faster-whisper>=1.0.3
 # Pin av below 15: faster-whisper 1.2.1 is incompatible with av 19,
 # which removed the `metadata_errors` kwarg faster-whisper passes to
