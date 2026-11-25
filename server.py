@@ -13,6 +13,13 @@ app shell is useless without the API, and the frontend shows its own
 login view when no token is stored, so page loads never redirect
 to /login.
 
+History is scoped per LOGIN SESSION: the bearer token doubles as the
+session identity (its SHA-256 is stored as the job's "owner"), so
+GET /api/jobs and GET /api/clips only ever return the current
+session's jobs and clips. A new login mints a new token and history
+looks empty; jobs made before scoping existed carry no owner and are
+moved to ./archive at startup, never shown again.
+
 Job lifecycle (async via FastAPI BackgroundTasks):
     queued -> downloading -> transcribing -> ready
     ready/done -> rendering -> done   (further renders from done allowed)
@@ -70,13 +77,20 @@ from clipper.highlights import generate_clips, get_loudness_curve, suggest_highl
 from clipper.render import MAX_CLIP_SECONDS, render_clip, theme_for_index
 from clipper.transcribe import TranscriptionUnavailable, transcribe
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 BASE_DIR = Path(__file__).resolve().parent
 WEB_DIR = BASE_DIR / "web"
 
 JOB_DIR = Path(os.environ.get("JOB_DIR", "./jobs"))
 if not JOB_DIR.is_absolute():
     JOB_DIR = (BASE_DIR / JOB_DIR).resolve()
+
+# Legacy jobs that predate per-session history (no "owner" stamped on
+# them) are moved here at startup instead of being loaded — they are
+# never visible to any user again, but the files are preserved on disk.
+ARCHIVE_DIR = Path(os.environ.get("ARCHIVE_DIR", "./archive"))
+if not ARCHIVE_DIR.is_absolute():
+    ARCHIVE_DIR = (BASE_DIR / ARCHIVE_DIR).resolve()
 MAX_DURATION = int(os.environ.get("MAX_DURATION", "14400"))
 MAX_FILE_MB = int(os.environ.get("MAX_FILE_MB", "2048"))
 # Finished jobs (ready/done/error) older than this are deleted from disk
@@ -205,6 +219,25 @@ def _token_from_request(request: Request) -> str | None:
     return None
 
 
+def _owner_id(request: Request) -> str | None:
+    """Per-login-session owner id for history scoping.
+
+    History is scoped per LOGIN SESSION: the id is the SHA-256 of the
+    bearer token (only the hash is ever stored — never the token
+    itself). Every login mints a fresh token, so after a logout — or
+    when the 30-day token expires — the next login gets a new id and
+    history looks empty; the old session's files stay on disk under
+    the old id until the 7-day retention prune. Two different logins
+    (two people, or the same person on two devices) never see each
+    other's jobs or clips. Returns None when no token is present
+    (fail-closed: such a request matches no job).
+    """
+    token = _token_from_request(request)
+    if not token:
+        return None
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:32]
+
+
 def _is_authenticated(request: Request) -> bool:
     token = _token_from_request(request)
     return bool(token) and _validate_token(token)
@@ -256,6 +289,7 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # Job dict shape:
 #   id, url, title, duration, thumbnail, status, progress, message,
+#   owner (SHA-256 of the login session's bearer token — history scoping),
 #   transcript: [{start, end, text, ...}],
 #   highlights: [{start, end, score, reasons}],
 #   clips: [{id, start, end, hook_text, cta_text, filename, size,
@@ -315,7 +349,13 @@ def _save_job(job: dict) -> None:
 
 
 def _load_jobs_from_disk() -> None:
-    """Reload jobs persisted by a previous run (if any)."""
+    """Reload jobs persisted by a previous run (if any).
+
+    Jobs saved before per-session history was introduced carry no
+    "owner" — they are moved to ARCHIVE_DIR instead of being loaded,
+    so the old mixed global history is never visible to anyone again
+    (the files are preserved on disk, just out of the job store).
+    """
     if not JOB_DIR.exists():
         return
     for directory in sorted(JOB_DIR.iterdir()):
@@ -326,6 +366,20 @@ def _load_jobs_from_disk() -> None:
             continue
         try:
             job = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not job.get("owner"):
+            # Pre-scoping legacy job: archive it, never load it.
+            try:
+                ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+                target = ARCHIVE_DIR / directory.name
+                if target.exists():
+                    target = ARCHIVE_DIR / f"{directory.name}-{int(time.time())}"
+                shutil.move(str(directory), str(target))
+            except OSError:
+                pass
+            continue
+        try:
             transcript_path = directory / "transcript.json"
             job["transcript"] = (
                 json.loads(transcript_path.read_text(encoding="utf-8"))
@@ -417,9 +471,13 @@ def _job_detail(job: dict) -> dict:
     return detail
 
 
-def _get_job_or_404(job_id: str) -> dict:
+def _get_job_or_404(job_id: str, owner: str | None = None) -> dict:
+    """Fetch a job, or 404. When an owner is given, a job owned by
+    someone else also 404s — the caller never learns it exists."""
     job = jobs.get(job_id)
     if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if owner is not None and job.get("owner") != owner:
         raise HTTPException(status_code=404, detail="Job not found.")
     return job
 
@@ -664,7 +722,7 @@ def login_page() -> Response:
 
 
 @app.post("/api/jobs", status_code=201)
-def create_job(payload: CreateJobRequest, background_tasks: BackgroundTasks) -> JSONResponse:
+def create_job(payload: CreateJobRequest, request: Request, background_tasks: BackgroundTasks) -> JSONResponse:
     try:
         url = validate_url(payload.url)
     except ValueError as exc:
@@ -680,6 +738,9 @@ def create_job(payload: CreateJobRequest, background_tasks: BackgroundTasks) -> 
         "progress": 0,
         "message": "Queued — starting download…",
         "created_at": _now_iso(),
+        # Per-login-session owner: this job (and its clips) is only
+        # ever listed for the session that created it.
+        "owner": _owner_id(request),
         "transcript": [],
         "highlights": [],
         "clips": [],
@@ -699,21 +760,26 @@ def create_job(payload: CreateJobRequest, background_tasks: BackgroundTasks) -> 
 
 
 @app.get("/api/jobs")
-def list_jobs() -> list[dict]:
-    ordered = sorted(jobs.values(), key=lambda j: j["created_at"], reverse=True)
+def list_jobs(request: Request) -> list[dict]:
+    """Jobs of this login session only, newest first."""
+    owner = _owner_id(request)
+    ordered = sorted(
+        (j for j in jobs.values() if j.get("owner") == owner),
+        key=lambda j: j["created_at"], reverse=True,
+    )
     return [_job_summary(job) for job in ordered]
 
 
 @app.get("/api/jobs/{job_id}")
-def get_job(job_id: str) -> dict:
-    return _job_detail(_get_job_or_404(job_id))
+def get_job(job_id: str, request: Request) -> dict:
+    return _job_detail(_get_job_or_404(job_id, _owner_id(request)))
 
 
 @app.post("/api/jobs/{job_id}/render", status_code=201)
 def render_job_clip(
-    job_id: str, payload: RenderRequest, background_tasks: BackgroundTasks
+    job_id: str, payload: RenderRequest, request: Request, background_tasks: BackgroundTasks
 ) -> JSONResponse:
-    job = _get_job_or_404(job_id)
+    job = _get_job_or_404(job_id, _owner_id(request))
     if job["status"] not in ("ready", "done"):
         raise HTTPException(
             status_code=400,
@@ -758,7 +824,7 @@ def render_job_clip(
 
 
 @app.post("/api/jobs/{job_id}/generate-clips")
-def generate_job_clips(job_id: str, payload: GenerateClipsRequest) -> JSONResponse:
+def generate_job_clips(job_id: str, payload: GenerateClipsRequest, request: Request) -> JSONResponse:
     """Generate N clips of X seconds from the job's best moments.
 
     Returns {"clips": [{start, end, score, reasons}], "note": str|None,
@@ -766,7 +832,7 @@ def generate_job_clips(job_id: str, payload: GenerateClipsRequest) -> JSONRespon
     the frontend shows the windows in the editor, where each clip's
     start/end stays editable before it is rendered.
     """
-    job = _get_job_or_404(job_id)
+    job = _get_job_or_404(job_id, _owner_id(request))
     if job["status"] not in ("ready", "done"):
         raise HTTPException(
             status_code=400,
@@ -809,8 +875,8 @@ def generate_job_clips(job_id: str, payload: GenerateClipsRequest) -> JSONRespon
 
 
 @app.get("/api/clips")
-def list_all_clips() -> list[dict]:
-    """Every finished clip across all jobs, newest first (History view).
+def list_all_clips(request: Request) -> list[dict]:
+    """Every finished clip of THIS login session, newest first (History view).
 
     Token-gated (unlike GET /api/clips/{id}, which is public so a
     <video> preview can load it without an Authorization header).
@@ -818,8 +884,11 @@ def list_all_clips() -> list[dict]:
     exists on disk are listed. Deleting happens per clip via
     DELETE /api/clips/{id} — the only way a clip leaves this list.
     """
+    owner = _owner_id(request)
     out: list[dict] = []
     for job in jobs.values():
+        if job.get("owner") != owner:
+            continue
         for clip in job.get("clips", []):
             if not clip.get("size"):
                 continue
@@ -860,8 +929,11 @@ def get_clip(clip_id: str) -> FileResponse:
 
 
 @app.delete("/api/clips/{clip_id}")
-def delete_clip(clip_id: str) -> dict:
+def delete_clip(clip_id: str, request: Request) -> dict:
+    owner = _owner_id(request)
     for job in jobs.values():
+        if job.get("owner") != owner:
+            continue
         clips = job.get("clips", [])
         clip = next((c for c in clips if c["id"] == clip_id), None)
         if clip is not None:
@@ -886,7 +958,7 @@ def delete_clip(clip_id: str) -> dict:
 # it waits. One download = one file (a playlist becomes a zip).
 # ---------------------------------------------------------------------------
 @app.post("/api/download", status_code=201)
-def create_download(payload: DownloadRequest) -> JSONResponse:
+def create_download(payload: DownloadRequest, request: Request) -> JSONResponse:
     _sweep_expired_downloads()
     try:
         url = validate_download_url(payload.url)
@@ -978,6 +1050,10 @@ def create_download(payload: DownloadRequest) -> JSONResponse:
         "items": len(files),
         "expires_at": expires_at,
         "created_at": _now_iso(),
+        # Per-login-session owner, recorded for auditing; the GET link
+        # itself stays public and one-time (a browser download link
+        # cannot carry a token), so the owner is not enforced there.
+        "owner": _owner_id(request),
     }
     return JSONResponse(
         status_code=201,
