@@ -63,22 +63,33 @@ FORMAT_SELECTOR = (
 # up to 1080p.
 QUALITY_HEIGHTS = {"best": 1080, "1080": 1080, "720": 720, "480": 480, "360": 360}
 
-# YouTube player clients, tried in order by yt-dlp's extractor.
-# The android client alone used to dodge YouTube's bot check from
-# datacenter IPs, but YouTube now challenges it too (25 Nov 2026: the
-# live tool hit the bot check on Railway with android only). Trying the
-# three API clients in turn, with the webpage client skipped entirely,
-# is the best no-cookies option left — the webpage client is the one
-# that most often triggers the bot check. The flags are ignored by
-# non-YouTube extractors, so every call passes them.
-YOUTUBE_PLAYER_CLIENTS = "android,ios,tv_embedded"
-YOUTUBE_PLAYER_SKIP = "webpage"
+# YouTube player client: the android client ALONE, and NOTHING skipped.
+# Tested 25 Nov 2026 (yt-dlp 2026.11.23, datacenter IP): android-only
+# with no player_skip succeeded 4/4 — metadata + a full 270 s download
+# of https://youtu.be/hRGzfqYAgbo — while every other combination failed:
+#   * "android,ios,tv_embedded" + player_skip=webpage (the 0.2.1 fix):
+#     FAILED — the live tool hit the bot check on Railway with it, and
+#     the tool's own fetch_metadata failed with it locally too.
+#   * player_skip=webpage on its own: FAILED even with android alone.
+#     Skipping the webpage client breaks the android path — the webpage
+#     download is what establishes the session (visitor data) that the
+#     API calls then ride on. The 0.2.1 assumption was backwards.
+#   * web client, with or without a bgutil PO token (bgutil-ytdlp-pot-
+#     provider 2.0.2 + its token server on :4416): FAILED from a
+#     datacenter IP, and adding web to the client list poisoned the
+#     android path too. So no token server is needed or used — the
+#     Dockerfile stays Node-free.
+# The flags are ignored by non-YouTube extractors, so every call passes
+# them.
+YOUTUBE_PLAYER_CLIENTS = "android"
 
 # A YouTube call that fails with a bot-check error is retried this many
-# extra times after a short sleep — the challenge is often transient
-# (a fresh request minutes later can pass on the same IP).
-YOUTUBE_BOT_RETRIES = 1
-YOUTUBE_BOT_RETRY_DELAY_S = 10
+# extra times after a sleep — the challenge is often transient (a fresh
+# request seconds later can pass on the same IP; android-only passed
+# 4/4 in testing, but Railway's IP may be more heavily flagged, so the
+# retries buy a large margin).
+YOUTUBE_BOT_RETRIES = 3
+YOUTUBE_BOT_RETRY_DELAY_S = 15
 
 
 def format_selector(quality: str = "best", max_size_mb: float | None = None) -> str:
@@ -215,14 +226,14 @@ def _is_bot_check(stderr: str) -> bool:
 
 def _run_yt_dlp(args: list[str], timeout: int, player_client: str | None = None) -> subprocess.CompletedProcess:
     """Run yt-dlp. player_client selects the YouTube player client(s)
-    (e.g. "android,ios,tv_embedded"); it is ignored by non-YouTube
-    extractors. A YouTube call that fails with a bot-check error is
-    retried once after a short sleep — the challenge is often transient."""
+    (currently "android" only — see YOUTUBE_PLAYER_CLIENTS); it is
+    ignored by non-YouTube extractors. A YouTube call that fails with a
+    bot-check error is retried up to YOUTUBE_BOT_RETRIES times with a
+    sleep between attempts — the challenge is often transient."""
     cmd = _yt_dlp_cmd()
     if player_client:
         cmd = cmd + [
             "--extractor-args", f"youtube:player_client={player_client}",
-            "--extractor-args", f"youtube:player_skip={YOUTUBE_PLAYER_SKIP}",
         ]
     is_youtube = any("youtube" in a or "youtu.be" in a for a in args)
     attempts = YOUTUBE_BOT_RETRIES + 1 if (is_youtube and player_client) else 1
@@ -326,13 +337,12 @@ def download_files(
     failure. The download is always the COMPLETE video for a single
     link (a playlist's items are each complete videos).
 
-    YouTube is fetched with three API player clients in turn
-    (android, ios, tv_embedded) and the webpage client skipped: YouTube's
-    bot check blocks yt-dlp's default (web) client from datacenter IPs
-    (this VM, and Railway's free tier the same way), and since 25 Nov
-    2026 it challenges the android client alone too — so the downloader
-    tries all three API clients, and retries once after a bot-check
-    failure. The flags are ignored for TikTok/Facebook.
+    YouTube is fetched with the android player client only (see
+    YOUTUBE_PLAYER_CLIENTS) — tested 25 Nov 2026: android-only passed
+    4/4 from a datacenter IP while the three-client set and the web
+    client (with or without a PO token) all failed. A bot-check failure
+    is retried up to YOUTUBE_BOT_RETRIES times with a sleep between
+    attempts. The flags are ignored for TikTok/Facebook.
 
     Raises ValueError for over-long sources and RuntimeError with a
     human-readable message on any yt-dlp failure or over-size result.

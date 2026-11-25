@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 LABEL org.opencontainers.image.title="Manan Clipping Tool"
 LABEL org.opencontainers.image.description="Manan Clipping Tool — turn long YouTube and Facebook videos into 9:16 vertical clips with captions, hooks and CTAs"
-LABEL org.opencontainers.image.version="0.2.1"
+LABEL org.opencontainers.image.version="0.2.2"
 
 # ffmpeg (and ffprobe) are required at runtime; fonts for ASS captions.
 RUN apt-get update \

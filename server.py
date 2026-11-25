@@ -78,7 +78,7 @@ from clipper.highlights import generate_clips, get_loudness_curve, suggest_highl
 from clipper.render import MAX_CLIP_SECONDS, render_clip, theme_for_index
 from clipper.transcribe import TranscriptionUnavailable, transcribe
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 BASE_DIR = Path(__file__).resolve().parent
 WEB_DIR = BASE_DIR / "web"
 
